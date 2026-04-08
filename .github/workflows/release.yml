@@ -25,11 +25,6 @@ jobs:
             artifact_name: rig
             asset_name: rig-macos-aarch64
 
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: rig.exe
-            asset_name: rig-windows-x86_64.exe
-
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +58,5 @@ jobs:
             rig-linux-x86_64/rig
             rig-macos-x86_64/rig
             rig-macos-aarch64/rig
-            rig-windows-x86_64.exe/rig.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
