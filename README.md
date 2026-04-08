@@ -11,7 +11,24 @@ A terminal UI for managing Claude AI skills and MCP servers.
 
 ## Installation
 
-Build from source (requires Rust 1.70+):
+### Download Pre-built Binary
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/dip497/rig/releases):
+
+- **Linux**: `rig-linux-x86_64`
+- **macOS Intel**: `rig-macos-x86_64`
+- **macOS Apple Silicon**: `rig-macos-aarch64`
+- **Windows**: `rig-windows-x86_64.exe`
+
+Make it executable (Linux/macOS):
+```bash
+chmod +x rig-linux-x86_64
+./rig-linux-x86_64
+```
+
+### Build from Source
+
+Requires Rust 1.70+:
 
 ```bash
 cargo build --release
