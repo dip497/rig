@@ -37,11 +37,25 @@ cargo build --release
 
 ## Usage
 
-Run the application:
+Launch the TUI:
 
 ```bash
 rig
 ```
+
+### Migrating from `npx skills`
+
+If you have skills installed via `npx skills add`, migrate them into rig's store:
+
+```bash
+rig migrate
+```
+
+This will:
+- Move skills from `~/.agents/skills/` → `~/.rig/skills/`
+- Move config from `~/.config/rig/` → `~/.rig/`
+- Scan agent directories for loose skills
+- Create symlinks in all agent directories
 
 ### Navigation
 
@@ -52,10 +66,20 @@ rig
 
 ## Configuration
 
-Configuration files are stored in your system's config directory:
-- Linux: `~/.config/rig/`
-- macOS: `~/Library/Application Support/rig/`
-- Windows: `%APPDATA%\rig\`
+All rig data lives in `~/.rig/`:
+
+```
+~/.rig/
+├── config.json          # Settings, agents, projects
+└── skills/              # Central skill store
+    └── <skill-name>/
+        └── SKILL.md
+```
+
+Skills are enabled per-agent via symlinks:
+```
+~/.claude/skills/<name>/  →  ~/.rig/skills/<name>/   (enabled)
+```
 
 ## Development
 

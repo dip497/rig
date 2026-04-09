@@ -7,7 +7,7 @@ use crate::store::Agent;
 #[derive(Debug, Clone)]
 pub struct Skill {
     pub name: String,
-    /// Exists in ~/.agents/skills/ (central store)
+    /// Exists in ~/.rig/skills/ (central store)
     pub in_store: bool,
     /// Agent name → enabled. Stable across agent reordering.
     pub enabled: HashMap<String, bool>,

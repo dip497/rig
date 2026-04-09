@@ -76,6 +76,9 @@ pub struct RigConfig {
     /// MCP servers soft-disabled by the user (keyed by "source_path::server_name")
     #[serde(default)]
     pub disabled_mcps: HashSet<String>,
+    /// Directories to scan for projects (e.g. ["~/projects", "~/work"])
+    #[serde(default)]
+    pub search_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,14 +94,15 @@ impl Default for RigConfig {
             projects: Vec::new(),
             last_project: None,
             disabled_mcps: HashSet::new(),
+            search_roots: Vec::new(),
         }
     }
 }
 
 impl RigConfig {
-    /// Merge auto-discovered projects, persist if new ones found
+    /// Merge auto-discovered projects (from search_roots + Claude sessions), persist if new
     pub fn merge_discovered(&mut self) {
-        let discovered = discover_projects();
+        let discovered = discover_projects(&self.search_roots);
         let existing: HashSet<PathBuf> = self.projects.iter().map(|p| p.path.clone()).collect();
         let mut added = false;
         for proj in discovered {
@@ -124,12 +128,60 @@ fn default_agents() -> Vec<Agent> {
             markers: vec![".claude".into()],
         },
         Agent {
-            name: "GSD".into(),
-            key: 'g',
+            name: "Cursor".into(),
+            key: 'u',
+            color: "Cyan".into(),
+            skill_dir: PathBuf::from("~/.cursor/skills"),
+            project_skill_dir: Some(PathBuf::from(".cursor/skills")),
+            markers: vec![".cursor".into()],
+        },
+        Agent {
+            name: "Windsurf".into(),
+            key: 'w',
+            color: "Blue".into(),
+            skill_dir: PathBuf::from("~/.codeium/windsurf/skills"),
+            project_skill_dir: Some(PathBuf::from(".windsurf/skills")),
+            markers: vec![".windsurf".into()],
+        },
+        Agent {
+            name: "Codex".into(),
+            key: 'x',
+            color: "Yellow".into(),
+            skill_dir: PathBuf::from("~/.codex/skills"),
+            project_skill_dir: Some(PathBuf::from(".codex/skills")),
+            markers: vec![".codex".into()],
+        },
+        Agent {
+            name: "Cline".into(),
+            key: 'l',
+            color: "Red".into(),
+            skill_dir: PathBuf::from("~/.cline/skills"),
+            project_skill_dir: Some(PathBuf::from(".cline/skills")),
+            markers: vec![".cline".into()],
+        },
+        Agent {
+            name: "Copilot".into(),
+            key: 'p',
+            color: "White".into(),
+            skill_dir: PathBuf::from("~/.copilot/skills"),
+            project_skill_dir: Some(PathBuf::from(".copilot/skills")),
+            markers: vec![".copilot".into(), ".github".into()],
+        },
+        Agent {
+            name: "Gemini".into(),
+            key: 'e',
+            color: "Cyan".into(),
+            skill_dir: PathBuf::from("~/.gemini/skills"),
+            project_skill_dir: Some(PathBuf::from(".gemini/skills")),
+            markers: vec![".gemini".into()],
+        },
+        Agent {
+            name: "Roo".into(),
+            key: 'r',
             color: "Magenta".into(),
-            skill_dir: PathBuf::from("~/.gsd/agent/skills"),
-            project_skill_dir: Some(PathBuf::from(".gsd/agent/skills")),
-            markers: vec![".gsd".into()],
+            skill_dir: PathBuf::from("~/.roo/skills"),
+            project_skill_dir: Some(PathBuf::from(".roo/skills")),
+            markers: vec![".roo".into()],
         },
     ]
 }
@@ -141,11 +193,11 @@ pub fn home() -> PathBuf {
 }
 
 pub fn skill_store() -> PathBuf {
-    home().join(".agents/skills")
+    home().join(".rig/skills")
 }
 
 fn config_path() -> PathBuf {
-    home().join(".config/rig/config.json")
+    home().join(".rig/config.json")
 }
 
 // ── Config I/O ──────────────────────────────────────────────────────────
@@ -307,27 +359,26 @@ fn discover_from_claude_active() -> Vec<PathBuf> {
 }
 
 /// Agent marker dirs to scan for
-const MARKER_DIRS: &[&str] = &[".claude", ".gsd", ".cursor", ".windsurf", ".copilot"];
+const MARKER_DIRS: &[&str] = &[
+    ".claude", ".cursor", ".windsurf", ".codex", ".cline",
+    ".copilot", ".github", ".gemini", ".roo", ".gsd",
+];
 
-/// Parent directories to scan for projects
-fn search_roots() -> Vec<PathBuf> {
-    let h = home();
-    vec![
-        h.join("projects"),
-        h.join("repos"),
-        h.join("code"),
-        h.join("work"),
-        h.join("Development"),
-        h.join("Development/project"),
-    ]
+/// Parent directories to scan for projects.
+/// Only scans dirs explicitly listed in config.search_roots.
+fn search_roots(roots: &[String]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .map(|s| PathBuf::from(shellexpand::tilde(s).to_string()))
+        .collect()
 }
 
 /// Scan parent dirs for subdirectories containing agent marker signals.
-/// Scans two levels deep to catch nested structures like ~/Development/project/motadata-*
-fn discover_from_markers() -> Vec<PathBuf> {
+/// Scans two levels deep to catch nested structures.
+fn discover_from_markers(custom_roots: &[String]) -> Vec<PathBuf> {
     let mut found = Vec::new();
 
-    for root in search_roots() {
+    for root in search_roots(custom_roots) {
         if !root.is_dir() {
             continue;
         }
@@ -416,7 +467,7 @@ fn is_project_dir(path: &Path) -> bool {
 }
 
 /// Full discovery: merge all sources, dedup, sort
-pub fn discover_projects() -> Vec<ProjectEntry> {
+pub fn discover_projects(custom_roots: &[String]) -> Vec<ProjectEntry> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut projects: Vec<ProjectEntry> = Vec::new();
 
@@ -432,7 +483,7 @@ pub fn discover_projects() -> Vec<ProjectEntry> {
     };
 
     // Source 1: Marker scanning (primary)
-    for path in discover_from_markers() {
+    for path in discover_from_markers(custom_roots) {
         if is_project_dir(&path) {
             add(path, &mut seen, &mut projects);
         }
@@ -457,122 +508,7 @@ pub fn discover_projects() -> Vec<ProjectEntry> {
 }
 
 // ── Migration ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Default)]
-pub struct MigrationResult {
-    pub moved: Vec<String>,
-    pub linked: Vec<String>,
-    pub skipped: Vec<String>,
-    pub errors: Vec<(String, String)>,
-}
-
-impl std::fmt::Display for MigrationResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if !self.moved.is_empty() {
-            write!(f, "moved {} to store", self.moved.len())?;
-            if !self.linked.is_empty() {
-                write!(f, ", ")?;
-            }
-        }
-        if !self.linked.is_empty() {
-            write!(
-                f,
-                "linked {} (already in store)",
-                self.linked.len()
-            )?;
-        }
-        if self.moved.is_empty() && self.linked.is_empty() && self.errors.is_empty() {
-            write!(f, "up to date")?;
-        }
-        if !self.errors.is_empty() {
-            write!(f, " ({} errors)", self.errors.len())?;
-        }
-        Ok(())
-    }
-}
-
-/// Migrate an agent's skill directory so rig can manage it
-pub fn migrate_agent(agent: &Agent) -> MigrationResult {
-    let mut result = MigrationResult::default();
-    let store = skill_store();
-    let agent_dir = agent.resolved_skill_dir(None);
-    let _ = std::fs::create_dir_all(&store);
-
-    let Ok(entries) = std::fs::read_dir(&agent_dir) else {
-        result.errors.push((
-            "agent_dir".into(),
-            format!("{} not found", agent_dir.display()),
-        ));
-        return result;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || !path.is_dir() || !path.join("SKILL.md").exists() {
-            continue;
-        }
-
-        if path
-            .symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            result.skipped.push(name);
-            continue;
-        }
-
-        let store_path = store.join(&name);
-        if store_path.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&path) {
-                result.errors.push((name, format!("rm: {e}")));
-                continue;
-            }
-            if let Err(e) = std::os::unix::fs::symlink(&store_path, &path) {
-                result.errors.push((name, format!("symlink: {e}")));
-                continue;
-            }
-            result.linked.push(name);
-        } else {
-            if std::fs::rename(&path, &store_path).is_err() {
-                if let Err(e) = copy_dir_recursive(&path, &store_path) {
-                    result.errors.push((name, format!("copy: {e}")));
-                    continue;
-                }
-                let _ = std::fs::remove_dir_all(&path);
-            }
-            let store_path = store.join(&name);
-            if let Err(e) = std::os::unix::fs::symlink(&store_path, &path) {
-                result.errors.push((name, format!("symlink: {e}")));
-                continue;
-            }
-            result.moved.push(name);
-        }
-    }
-    result
-}
-
-pub fn migrate_all(config: &RigConfig) -> Vec<(String, MigrationResult)> {
-    config
-        .agents
-        .iter()
-        .map(|a| (a.name.clone(), migrate_agent(a)))
-        .collect()
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let (s, d) = (entry.path(), dst.join(entry.file_name()));
-        if s.is_dir() {
-            copy_dir_recursive(&s, &d)?;
-        } else {
-            std::fs::copy(&s, &d)?;
-        }
-    }
-    Ok(())
-}
+// All migration logic lives in src/migrate.rs and is invoked via `rig migrate`.
 
 // ── Skill operations ────────────────────────────────────────────────────
 
@@ -719,52 +655,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_claude_decode_known_projects() {
-        let cases = vec![
-            "-home-dipendra-sharma-projects-onelens",
-            "-home-dipendra-sharma-projects-wakey",
-            "-home-dipendra-sharma-projects-rig",
-        ];
-        for encoded in cases {
-            let result = decode_claude_project(encoded);
-            assert!(result.is_some(), "should decode: {encoded}");
-            assert!(result.unwrap().is_dir());
-        }
-    }
-
-    #[test]
     fn test_claude_decode_rejects_nonexistent() {
-        assert!(decode_claude_project("-home-dipendra-sharma-nonexistent-dir-xyz").is_none());
+        assert!(decode_claude_project("-nonexistent-path-that-does-not-exist").is_none());
     }
 
     #[test]
-    fn test_discover_finds_known_projects() {
-        let projects = discover_projects();
-        let names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.iter().any(|n| *n == "onelens"), "should find onelens");
-        assert!(names.iter().any(|n| *n == "wakey"), "should find wakey");
-        assert!(names.iter().any(|n| *n == "hivecore"), "should find hivecore");
-        // Container dirs filtered out
-        assert!(
-            !names.iter().any(|n| *n == "projects"),
-            "should NOT include ~/projects (container)"
-        );
+    fn test_claude_decode_rejects_empty() {
+        assert!(decode_claude_project("").is_none());
+        assert!(decode_claude_project("no-leading-dash").is_none());
     }
 
     #[test]
-    fn test_agent_signal_detection() {
-        let config = load_config();
-        let claude = config.agents.iter().find(|a| a.name == "Claude").unwrap();
-        let gsd = config.agents.iter().find(|a| a.name == "GSD").unwrap();
-        let onelens = home().join("projects/onelens");
-        if onelens.is_dir() {
-            assert!(claude.has_signal_in(&onelens), "Claude in onelens");
-            assert!(gsd.has_signal_in(&onelens), "GSD in onelens");
-        }
+    fn test_is_project_dir_needs_marker() {
+        // A temp dir with no project markers should not be a project
+        let tmp = std::env::temp_dir().join("rig-test-empty");
+        let _ = std::fs::create_dir_all(&tmp);
+        assert!(!is_project_dir(&tmp));
+        let _ = std::fs::remove_dir(&tmp);
     }
 
     #[test]
-    fn test_is_project_dir_rejects_containers() {
-        assert!(!is_project_dir(&home().join("projects")));
+    fn test_is_project_dir_with_git() {
+        let tmp = std::env::temp_dir().join("rig-test-git");
+        let _ = std::fs::create_dir_all(tmp.join(".git"));
+        assert!(is_project_dir(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_default_config_has_agents() {
+        let config = RigConfig::default();
+        assert!(config.agents.len() >= 2);
+        assert!(config.agents.iter().any(|a| a.name == "Claude"));
+    }
+
+    #[test]
+    fn test_search_roots_empty_by_default() {
+        let config = RigConfig::default();
+        assert!(config.search_roots.is_empty());
+        assert!(search_roots(&config.search_roots).is_empty());
+    }
+
+    #[test]
+    fn test_search_roots_expands_tilde() {
+        let roots = vec!["~/projects".to_string()];
+        let expanded = search_roots(&roots);
+        assert_eq!(expanded.len(), 1);
+        assert!(!expanded[0].to_string_lossy().contains('~'));
     }
 }
