@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use ratatui::widgets::ListState;
 
 use crate::mcp::McpEntry;
+use crate::scanner::Verdict;
 use crate::skills::Skill;
 use crate::store::{self, RigConfig};
 
@@ -24,11 +26,41 @@ pub enum Screen {
 
 // ── Modes (within any screen) ──────────────────────────────────────────────
 
+// ── Sort mode ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SortMode {
+    #[default]
+    Name,
+    EnabledCount,
+}
+
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            SortMode::Name => SortMode::EnabledCount,
+            SortMode::EnabledCount => SortMode::Name,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            SortMode::Name => "name",
+            SortMode::EnabledCount => "enabled",
+        }
+    }
+}
+
+// ── Mode ───────────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mode {
     Normal,
     Filter(String),
     Confirm(ConfirmAction),
+    /// User is typing a source URL to install.  The String is the current input.
+    Install(String),
+    /// Showing skill detail overlay for the named skill.
+    SkillDetail(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +68,7 @@ pub enum ConfirmAction {
     BulkEnable(AgentScope),
     BulkDisable(AgentScope),
     DeleteMcp { name: String, source_path: PathBuf },
+    UninstallSkill { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -139,6 +172,13 @@ pub struct App {
     pub sidebar_state: ListState,
     pub status: Option<Status>,
 
+    pub sort_mode: SortMode,
+
+    /// Cached skill descriptions (name → first line of SKILL.md description)
+    pub skill_descriptions: HashMap<String, String>,
+    /// Cached security verdicts (name → Verdict)
+    pub security_cache: HashMap<String, Verdict>,
+
     pub should_quit: bool,
 }
 
@@ -158,6 +198,9 @@ impl App {
             list_state: ListState::default(),
             sidebar_state: ListState::default(),
             status: None,
+            sort_mode: SortMode::default(),
+            skill_descriptions: HashMap::new(),
+            security_cache: HashMap::new(),
             should_quit: false,
         };
         app.sidebar_state.select(Some(0));
@@ -184,6 +227,17 @@ impl App {
         let dir = self.project_dir();
         self.skills = crate::skills::scan(&self.config.agents, dir.as_ref());
         self.mcp_entries = crate::mcp::scan(dir.as_ref());
+        self.skill_descriptions = crate::skills::load_descriptions();
+
+        // Refresh security cache
+        let store = crate::store::skill_store();
+        self.security_cache.clear();
+        for skill in &self.skills {
+            if skill.in_store {
+                let report = crate::scanner::scan_dir(&store.join(&skill.name));
+                self.security_cache.insert(skill.name.clone(), report.verdict);
+            }
+        }
     }
 
     // ── Filtered views ──────────────────────────────────────────────────
@@ -197,10 +251,19 @@ impl App {
 
     pub fn filtered_skills(&self) -> Vec<&Skill> {
         let q = self.filter_query().to_lowercase();
-        self.skills
+        let mut skills: Vec<&Skill> = self.skills
             .iter()
             .filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q))
-            .collect()
+            .collect();
+        match self.sort_mode {
+            SortMode::Name => skills.sort_by(|a, b| a.name.cmp(&b.name)),
+            SortMode::EnabledCount => skills.sort_by(|a, b| {
+                let ca = b.enabled.values().filter(|&&v| v).count();
+                let cb = a.enabled.values().filter(|&&v| v).count();
+                ca.cmp(&cb).then(a.name.cmp(&b.name))
+            }),
+        }
+        skills
     }
 
     pub fn filtered_mcp(&self) -> Vec<&McpEntry> {

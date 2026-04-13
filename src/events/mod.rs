@@ -5,10 +5,59 @@ pub mod project;
 use crossterm::event::{Event, KeyCode, KeyEvent};
 
 use crate::app::{App, Focus, Mode, Screen, Status};
+use crate::installer;
 
 /// Top-level event dispatcher. Routes to the right screen handler.
 pub fn handle_event(app: &mut App, ev: Event) {
     let Event::Key(key) = ev else { return };
+
+    // ── Skill detail overlay: close on Esc or Enter ───
+    if matches!(app.mode, Mode::SkillDetail(_)) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                app.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // ── Install mode: capture URL input ───────────────
+    if let Mode::Install(ref mut input) = app.mode {
+        match key.code {
+            KeyCode::Esc => {
+                app.mode = Mode::Normal;
+                app.set_status(Status::info("Cancelled"));
+            }
+            KeyCode::Backspace => {
+                input.pop();
+            }
+            KeyCode::Char(c) => {
+                input.push(c);
+            }
+            KeyCode::Enter => {
+                let source = input.trim().to_string();
+                if source.is_empty() {
+                    app.mode = Mode::Normal;
+                    return;
+                }
+                app.mode = Mode::Normal;
+                app.set_status(Status::info(format!("Installing {}…", source)));
+                let result = installer::tui_install(&source, &app.config);
+                if let Some(err) = result.error {
+                    app.set_status(Status::err(format!("Install failed: {err}")));
+                } else if result.installed.is_empty() {
+                    app.set_status(Status::err("No skills found in source"));
+                } else {
+                    let names = result.installed.join(", ");
+                    app.set_status(Status::ok(format!("Installed: {names}")));
+                    app.rescan();
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
 
     // ── Filter mode: capture all keys ──────────────────
     if let Mode::Filter(ref mut query) = app.mode {
@@ -70,9 +119,18 @@ pub fn handle_event(app: &mut App, ev: Event) {
             app.mode = Mode::Filter(String::new());
             return;
         }
+        KeyCode::Char('i') => {
+            app.mode = Mode::Install(String::new());
+            return;
+        }
         KeyCode::Char('r') => {
             app.rescan();
             app.set_status(Status::ok("Rescanned"));
+            return;
+        }
+        KeyCode::Char('S') => {
+            app.sort_mode = app.sort_mode.next();
+            app.set_status(Status::info(format!("Sort: {}", app.sort_mode.label())));
             return;
         }
         _ => {}
@@ -257,6 +315,18 @@ fn execute_confirm(app: &mut App, action: &crate::app::ConfirmAction) {
                     app.rescan();
                 }
                 Err(e) => app.set_status(Status::err(format!("{}", e))),
+            }
+        }
+        ConfirmAction::UninstallSkill { name } => {
+            match store::uninstall_skill(name, &app.config.agents, &app.config.projects) {
+                Ok(n) => {
+                    app.set_status(Status::ok(format!(
+                        "Uninstalled '{}' — removed {} links + store", name, n
+                    )));
+                    app.rescan();
+                    app.clamp_matrix();
+                }
+                Err(e) => app.set_status(Status::err(format!("Uninstall failed: {}", e))),
             }
         }
     }

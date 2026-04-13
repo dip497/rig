@@ -604,6 +604,48 @@ pub fn enable_all(agent: &Agent, project_dir: Option<&PathBuf>) -> Result<usize>
     Ok(count)
 }
 
+/// Remove a skill entirely: all symlinks (global + per-project) + store entry + lock
+pub fn uninstall_skill(name: &str, agents: &[Agent], projects: &[ProjectEntry]) -> Result<usize> {
+    let mut removed = 0usize;
+
+    // Remove from each agent's global skill dir
+    for agent in agents {
+        let link = agent.resolved_skill_dir(None).join(name);
+        if link.symlink_metadata().is_ok() {
+            std::fs::remove_file(&link)
+                .or_else(|_| std::fs::remove_dir_all(&link))?;
+            removed += 1;
+        }
+    }
+
+    // Remove from each agent's per-project skill dir
+    for proj in projects {
+        for agent in agents {
+            let link = agent.resolved_skill_dir(Some(&proj.path)).join(name);
+            if link.symlink_metadata().is_ok() {
+                std::fs::remove_file(&link)
+                    .or_else(|_| std::fs::remove_dir_all(&link))?;
+                removed += 1;
+            }
+        }
+    }
+
+    // Remove from store
+    let store_path = skill_store().join(name);
+    if store_path.symlink_metadata().is_ok() {
+        if store_path.symlink_metadata()?.file_type().is_symlink() {
+            std::fs::remove_file(&store_path)?;
+        } else {
+            std::fs::remove_dir_all(&store_path)?;
+        }
+    }
+
+    // Remove from lock file
+    let _ = crate::lock::remove(name);
+
+    Ok(removed)
+}
+
 // ── MCP operations ──────────────────────────────────────────────────────
 
 /// Soft-toggle: add/remove from disabled_mcps set in config (non-destructive)

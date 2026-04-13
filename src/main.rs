@@ -1,7 +1,10 @@
 mod app;
 mod events;
+mod installer;
+mod lock;
 mod mcp;
 mod migrate;
+mod scanner;
 mod skills;
 mod store;
 mod ui;
@@ -21,6 +24,9 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(|s| s.as_str()) {
         Some("migrate") => return migrate::run(),
         Some("project") => return handle_project(&args[2..]),
+        Some("install") => return handle_install(&args[2..]),
+        Some("outdated") => return installer::cmd_outdated(),
+        Some("update") => return handle_update(&args[2..]),
         Some("--help" | "-h") => {
             print_help();
             return Ok(());
@@ -56,12 +62,27 @@ fn main() -> anyhow::Result<()> {
 fn print_help() {
     println!("rig — manage AI skills & MCP servers\n");
     println!("Usage:");
-    println!("  rig                        Launch the TUI");
-    println!("  rig migrate                Migrate skills into ~/.rig/skills/");
-    println!("  rig project add <path>     Add a project to manage");
-    println!("  rig project remove <name>  Remove a project");
-    println!("  rig project list           List managed projects");
-    println!("  rig --help                 Show this help");
+    println!("  rig                               Launch the TUI");
+    println!("  rig install <source> [opts]       Install a skill from GitHub or local path");
+    println!("  rig outdated                      Check for outdated installed skills");
+    println!("  rig update [name] [--yes]         Update a skill (or all skills)");
+    println!("  rig migrate                       Migrate skills into ~/.rig/skills/");
+    println!("  rig project add <path>            Add a project to manage");
+    println!("  rig project remove <name>         Remove a project");
+    println!("  rig project list                  List managed projects");
+    println!("  rig --help                        Show this help");
+    println!();
+    println!("Install sources:");
+    println!("  owner/repo                        GitHub shorthand");
+    println!("  github:owner/repo[#ref[:subpath]] Full GitHub source");
+    println!("  https://github.com/owner/repo     GitHub URL");
+    println!("  /path/to/dir  or  ./relative      Local directory");
+    println!();
+    println!("Install options:");
+    println!("  --agent <name|all>                Limit to one agent (default: all)");
+    println!("  --all                             Install all skills in a multi-skill repo");
+    println!("  --force                           Overwrite existing skill");
+    println!("  --yes                             Skip security confirmations");
 }
 
 fn handle_project(args: &[String]) -> anyhow::Result<()> {
@@ -145,6 +166,66 @@ fn handle_project(args: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn handle_install(args: &[String]) -> anyhow::Result<()> {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
+        installer::print_install_help();
+        return Ok(());
+    }
+
+    // First positional arg is the source; rest are flags
+    let source = args[0].as_str();
+    let mut agent_filter: Option<&str> = None;
+    let mut force = false;
+    let mut all = false;
+    let mut yes = false;
+    let mut project_dir: Option<std::path::PathBuf> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--agent" => {
+                i += 1;
+                agent_filter = args.get(i).map(|s| s.as_str());
+            }
+            "--force" => force = true,
+            "--all" => all = true,
+            "--yes" => yes = true,
+            "--project" => {
+                i += 1;
+                if let Some(p) = args.get(i) {
+                    project_dir = Some(std::path::PathBuf::from(p));
+                }
+            }
+            unknown => {
+                anyhow::bail!("Unknown option: {unknown}. Run `rig install --help` for usage.");
+            }
+        }
+        i += 1;
+    }
+
+    installer::cmd_install(&installer::InstallOpts {
+        source,
+        agent_filter,
+        project_dir,
+        force,
+        all,
+        yes,
+    })
+}
+
+fn handle_update(args: &[String]) -> anyhow::Result<()> {
+    let mut yes = false;
+    let mut names: Vec<String> = Vec::new();
+    for arg in args {
+        if arg == "--yes" {
+            yes = true;
+        } else {
+            names.push(arg.clone());
+        }
+    }
+    installer::cmd_update(&names, yes)
 }
 
 fn run_tui(terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {

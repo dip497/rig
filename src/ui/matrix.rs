@@ -6,10 +6,11 @@ use ratatui::{
     widgets::{Cell, Paragraph, Row, Table},
 };
 
-use crate::app::{App, Focus};
+use crate::app::App;
+use crate::scanner::Verdict;
 
-/// Width of the skill name column
-const NAME_COL: u16 = 22;
+/// Width of the skill name column (includes space for security badge)
+const NAME_COL: u16 = 28;
 /// Minimum width for a project column (agent dots need at least this)
 const MIN_COL_WIDTH: u16 = 8;
 
@@ -19,7 +20,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 
     if filtered_count == 0 {
         let msg = if skills_empty {
-            "No skills found. Install with: npx skills add <name>"
+            "No skills found.  Press [i] to install, or run: rig install <source>"
         } else {
             "No skills match the current filter"
         };
@@ -121,24 +122,42 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
                 Style::default().fg(Color::Gray)
             };
             let name_suffix = if !skill.in_store { " !" } else { "" };
-            let name_cell = Cell::from(Span::styled(
-                format!(
-                    "{:<width$}{}",
-                    &skill.name,
-                    name_suffix,
-                    width = (NAME_COL as usize).saturating_sub(2)
-                ),
+
+            // Security badge
+            let badge = app.security_cache.get(&skill.name).map(|v| match v {
+                Verdict::Safe      => Span::styled("[S]", Style::default().fg(Color::Green)),
+                Verdict::Caution   => Span::styled("[C]", Style::default().fg(Color::Cyan)),
+                Verdict::Warning   => Span::styled("[W]", Style::default().fg(Color::Yellow)),
+                Verdict::Dangerous => Span::styled("[!]", Style::default().fg(Color::Red).bold()),
+            });
+
+            let name_width = (NAME_COL as usize).saturating_sub(8); // room for badge + padding
+            let mut name_spans = vec![Span::styled(
+                format!("{:<width$}{}", &skill.name, name_suffix, width = name_width),
                 name_style,
-            ));
+            )];
+            if let Some(b) = badge {
+                name_spans.push(Span::raw(" "));
+                name_spans.push(b);
+            }
+            let name_cell = Cell::from(Line::from(name_spans));
 
             let mut cells = vec![name_cell];
+
+            // Compute global agent states for diff highlighting
+            let global_states: Vec<bool> = agents.iter().map(|agent| {
+                agent.resolved_skill_dir(None).join(&skill.name).exists()
+            }).collect();
 
             for (vis_idx, (_, col_proj_idx)) in visible_columns.iter().enumerate() {
                 let actual_col = scroll_col + vis_idx;
                 let is_cursor_cell = is_cursor_row && actual_col == app.matrix.cursor_col;
+                let is_project_col = col_proj_idx.is_some();
 
                 let mut agent_spans = vec![];
-                for agent in agents.iter() {
+                let mut has_diff = false;
+
+                for (agent_idx, agent) in agents.iter().enumerate() {
                     let is_on = if col_proj_idx.is_none() {
                         skill.is_enabled(&agent.name)
                     } else {
@@ -153,6 +172,11 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
                             skill.is_enabled(&agent.name)
                         }
                     };
+
+                    // Diff: project column differs from global
+                    if is_project_col && is_on != global_states[agent_idx] {
+                        has_diff = true;
+                    }
 
                     let (symbol, color) = if is_on {
                         (agent.key.to_uppercase().to_string(), agent.color())
@@ -172,10 +196,16 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
                     agent_spans.push(Span::raw(" "));
                 }
 
-                cells.push(Cell::from(Line::from(agent_spans)));
+                let cell = Cell::from(Line::from(agent_spans));
+                let cell = if has_diff && !is_cursor_cell {
+                    cell.style(Style::default().bg(Color::Rgb(50, 35, 20)))
+                } else {
+                    cell
+                };
+                cells.push(cell);
             }
 
-            let row_style = if is_cursor_row && app.focus == Focus::Content {
+            let row_style = if is_cursor_row && app.focus == crate::app::Focus::Content {
                 Style::default().bg(Color::Rgb(30, 30, 40))
             } else {
                 Style::default()

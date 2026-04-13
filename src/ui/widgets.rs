@@ -85,6 +85,7 @@ pub fn draw_header(app: &App, f: &mut Frame, area: Rect) {
 
 pub fn draw_screen_tabs(app: &App, f: &mut Frame, area: Rect) {
     let en = app.skills.iter().filter(|s| s.any_enabled()).count();
+    let in_store = app.skills.iter().filter(|s| s.in_store).count();
     let total = app.skills.len();
     let mcp_n = app.mcp_entries.len();
 
@@ -92,8 +93,9 @@ pub fn draw_screen_tabs(app: &App, f: &mut Frame, area: Rect) {
     let mcp_active = matches!(app.screen, Screen::Mcp);
     let proj_active = matches!(app.screen, Screen::ProjectDetail(_));
 
+    let skill_suffix = format!(" [{}/{} store:{}]", en, total, in_store);
     let mut spans = vec![
-        tab_span("s", "kills", &format!(" [{}/{}]", en, total), skill_active, Color::Cyan),
+        tab_span("s", "kills", &skill_suffix, skill_active, Color::Cyan),
         Span::raw("  "),
         tab_span("m", "cp", &format!(" [{}]", mcp_n), mcp_active, Color::Green),
     ];
@@ -102,6 +104,13 @@ pub fn draw_screen_tabs(app: &App, f: &mut Frame, area: Rect) {
         spans.push(Span::raw("  "));
         spans.push(tab_span("p", "roject", "", true, Color::Magenta));
     }
+
+    // Sort mode indicator
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!("sort:{}", app.sort_mode.label()),
+        Style::default().fg(Color::DarkGray),
+    ));
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -114,7 +123,26 @@ fn tab_span(key: &str, rest: &str, suffix: &str, active: bool, color: Color) -> 
     )
 }
 
-// ── Filter bar ─────────────────────────────────────────────────────────────
+// ── Preview bar (inline description of cursor skill) ────────────────────
+
+pub fn draw_preview_bar(app: &App, f: &mut Frame, area: Rect) {
+    if !matches!(app.screen, Screen::Matrix) {
+        return;
+    }
+    let filtered = app.filtered_skills();
+    let Some(skill) = filtered.get(app.matrix.cursor_row) else { return };
+    if let Some(desc) = app.skill_descriptions.get(&skill.name) {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                format!(" {} ", desc),
+                Style::default().fg(Color::DarkGray).italic(),
+            )),
+            area,
+        );
+    }
+}
+
+// ── Filter / Install bar ────────────────────────────────────────────────────
 
 pub fn draw_filter_bar(app: &App, f: &mut Frame, area: Rect) {
     match &app.mode {
@@ -126,10 +154,15 @@ pub fn draw_filter_bar(app: &App, f: &mut Frame, area: Rect) {
                 area,
             );
         }
-        _ => {
-            // Show active filter if any (from last confirmed search)
-            // Currently filters are cleared on mode exit, so nothing here
+        Mode::Install(input) => {
+            let text = format!("install: {}_", input);
+            f.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().fg(Color::Cyan).bg(Color::DarkGray)),
+                area,
+            );
         }
+        _ => {}
     }
 }
 
@@ -182,6 +215,9 @@ pub fn draw_help_bar(app: &App, f: &mut Frame, area: Rect) {
 fn matrix_help(app: &App) -> Vec<Span<'static>> {
     let mut spans = vec![
         help_key("Space", "toggle"),
+        help_key("Enter", "detail"),
+        help_key("S", "sort"),
+        help_key("i", "install"),
     ];
 
     // Show agent column numbers
@@ -197,6 +233,7 @@ fn matrix_help(app: &App) -> Vec<Span<'static>> {
     }
 
     spans.push(Span::raw("  "));
+    spans.push(help_key("u", "uninstall"));
     spans.push(help_key("E/D", "bulk"));
     spans
 }

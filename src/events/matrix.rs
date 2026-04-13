@@ -81,6 +81,28 @@ pub fn handle(app: &mut App, key: KeyEvent) {
             }
         }
 
+        // ── Skill detail overlay ───────────────────────
+        KeyCode::Enter => {
+            let filtered = app.filtered_skills();
+            if let Some(skill) = filtered.get(app.matrix.cursor_row) {
+                app.mode = Mode::SkillDetail(skill.name.clone());
+            }
+        }
+
+        // ── Uninstall skill ────────────────────────────
+        KeyCode::Char('u') => {
+            let filtered = app.filtered_skills();
+            if let Some(skill) = filtered.get(app.matrix.cursor_row) {
+                if skill.in_store {
+                    let name = skill.name.clone();
+                    app.mode = Mode::Confirm(ConfirmAction::UninstallSkill { name: name.clone() });
+                    app.set_status(Status::info(format!("Uninstall '{}'? removes from store + all agents (y/n)", name)));
+                } else {
+                    app.set_status(Status::err("Skill not in store"));
+                }
+            }
+        }
+
         // ── Bulk enable/disable ────────────────────────
         KeyCode::Char('E') => {
             app.mode = Mode::Confirm(ConfirmAction::BulkEnable(AgentScope::All));
@@ -101,8 +123,8 @@ fn toggle_at_cursor(app: &mut App) {
 
     if !skill.in_store {
         app.set_status(Status::err(format!(
-            "'{}' not in store — install with: npx skills add {}",
-            skill.name, skill.name
+            "'{}' not in store — press [i] to install or run: rig install <source>",
+            skill.name
         )));
         return;
     }

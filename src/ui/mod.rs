@@ -3,11 +3,12 @@ pub mod mcp;
 pub mod project;
 pub mod widgets;
 pub mod help;
+pub mod skill_detail;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 
-use crate::app::{App, Screen};
+use crate::app::{App, Mode, Screen};
 
 pub fn draw(app: &mut App, f: &mut Frame) {
     app.tick_status();
@@ -25,6 +26,7 @@ pub fn draw(app: &mut App, f: &mut Frame) {
             Constraint::Length(1),  // header
             Constraint::Length(1),  // tabs / screen indicator
             Constraint::Min(5),    // content
+            Constraint::Length(1),  // preview bar
             Constraint::Length(1),  // search / filter bar
             Constraint::Length(1),  // status
             Constraint::Length(2),  // help
@@ -45,7 +47,13 @@ pub fn draw(app: &mut App, f: &mut Frame) {
         Screen::Help => help::draw(app, f, main[2]),
     }
 
-    widgets::draw_filter_bar(app, f, main[3]);
-    widgets::draw_status(app, f, main[4]);
-    widgets::draw_help_bar(app, f, main[5]);
+    widgets::draw_preview_bar(app, f, main[3]);
+    widgets::draw_filter_bar(app, f, main[4]);
+    widgets::draw_status(app, f, main[5]);
+    widgets::draw_help_bar(app, f, main[6]);
+
+    // Overlay: skill detail (rendered last, on top of everything)
+    if let Mode::SkillDetail(ref name) = app.mode.clone() {
+        skill_detail::draw(app, f, name);
+    }
 }
