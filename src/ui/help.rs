@@ -47,6 +47,8 @@ pub fn draw(_app: &App, f: &mut Frame, area: Rect) {
         Line::from(""),
         section("Other"),
         key_line("/", "Filter / search (Esc to clear, Enter to confirm)"),
+        key_line("  ↑/↓  or  Ctrl+j/k", "Navigate results while filtering"),
+        key_line("\\", "Clear active filter"),
         key_line("i", "Install a skill from GitHub or local path"),
         key_line("r", "Rescan / refresh"),
         key_line("q", "Quit"),

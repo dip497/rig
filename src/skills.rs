@@ -226,3 +226,267 @@ fn count_files(dir: &Path) -> usize {
     count
 }
 
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    struct SkillSandbox {
+        base: PathBuf,
+    }
+
+    impl SkillSandbox {
+        fn new(name: &str) -> Self {
+            let base = std::env::temp_dir().join(format!("rig-skill-test-{}", name));
+            let _ = fs::remove_dir_all(&base);
+            fs::create_dir_all(&base).unwrap();
+            Self { base }
+        }
+
+        fn add_skill_dir(&self, name: &str) {
+            let dir = self.base.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: test {name}\n---\n"),
+            ).unwrap();
+        }
+
+        fn add_skill_dir_custom(&self, name: &str, frontmatter: &str) {
+            let dir = self.base.join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), frontmatter).unwrap();
+        }
+
+        fn add_empty_dir(&self, name: &str) {
+            fs::create_dir_all(self.base.join(name)).unwrap();
+        }
+
+        fn add_file_in(&self, skill: &str, file: &str, content: &str) {
+            let dir = self.base.join(skill);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(file), content).unwrap();
+        }
+    }
+
+    impl Drop for SkillSandbox {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    // ── collect_names ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_collect_names_finds_skills() {
+        let sb = SkillSandbox::new("collect");
+        sb.add_skill_dir("alpha");
+        sb.add_skill_dir("beta");
+        sb.add_empty_dir("not-a-skill"); // no SKILL.md
+
+        let mut names = std::collections::BTreeSet::new();
+        collect_names(&sb.base, &mut names);
+
+        assert!(names.contains("alpha"));
+        assert!(names.contains("beta"));
+        assert!(!names.contains("not-a-skill"));
+    }
+
+    #[test]
+    fn test_collect_names_empty_dir() {
+        let sb = SkillSandbox::new("empty");
+        let mut names = std::collections::BTreeSet::new();
+        collect_names(&sb.base, &mut names);
+        assert!(names.is_empty());
+    }
+
+    // ── parse_frontmatter ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_frontmatter_full() {
+        let sb = SkillSandbox::new("fm-full");
+        sb.add_skill_dir_custom("skill", "---\nname: My Skill\ndescription: A test\nversion: \"1.0\"\ncreator: test\nlicense: MIT\n---\n# Body\n");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        assert_eq!(fm.get("name").unwrap(), "My Skill");
+        assert_eq!(fm.get("description").unwrap(), "A test");
+        assert_eq!(fm.get("version").unwrap(), "1.0");
+        assert_eq!(fm.get("creator").unwrap(), "test");
+        assert_eq!(fm.get("license").unwrap(), "MIT");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_minimal() {
+        let sb = SkillSandbox::new("fm-min");
+        sb.add_skill_dir_custom("skill", "---\nname: x\n---\nBody");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        assert_eq!(fm.get("name").unwrap(), "x");
+        assert_eq!(fm.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_frontmatter_no_frontmatter() {
+        let sb = SkillSandbox::new("fm-none");
+        sb.add_skill_dir_custom("skill", "Just some text\nNo frontmatter at all\n");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        assert!(fm.is_empty());
+    }
+
+    #[test]
+    fn test_parse_frontmatter_empty_values_skipped() {
+        let sb = SkillSandbox::new("fm-empty");
+        sb.add_skill_dir_custom("skill", "---\nname:\ndescription: \"\"\n---\n");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        // Empty values should not be inserted
+        assert!(!fm.contains_key("name"));
+        assert!(!fm.contains_key("description"));
+    }
+
+    #[test]
+    fn test_parse_frontmatter_single_quoted() {
+        let sb = SkillSandbox::new("fm-squote");
+        sb.add_skill_dir_custom("skill", "---\nname: 'my skill'\n---\n");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        assert_eq!(fm.get("name").unwrap(), "my skill");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_double_quoted() {
+        let sb = SkillSandbox::new("fm-dquote");
+        sb.add_skill_dir_custom("skill", "---\nname: \"my skill\"\n---\n");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        assert_eq!(fm.get("name").unwrap(), "my skill");
+    }
+
+    #[test]
+    fn test_parse_frontmatter_keys_are_lowercase() {
+        let sb = SkillSandbox::new("fm-case");
+        sb.add_skill_dir_custom("skill", "---\nName: test\nDESCRIPTION: hello\n---\n");
+
+        let fm = parse_frontmatter(&sb.base.join("skill/SKILL.md"));
+        assert_eq!(fm.get("name").unwrap(), "test");
+        assert_eq!(fm.get("description").unwrap(), "hello");
+    }
+
+    // ── Skill ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_skill_is_enabled() {
+        let mut enabled = HashMap::new();
+        enabled.insert("Claude".into(), true);
+        enabled.insert("Cursor".into(), false);
+        let skill = Skill {
+            name: "test".into(),
+            in_store: true,
+            enabled,
+        };
+        assert!(skill.is_enabled("Claude"));
+        assert!(!skill.is_enabled("Cursor"));
+        assert!(!skill.is_enabled("Unknown")); // not in map → false
+    }
+
+    #[test]
+    fn test_skill_any_enabled() {
+        let skill_on = Skill {
+            name: "on".into(),
+            in_store: true,
+            enabled: HashMap::from([("a".into(), true)]),
+        };
+        let skill_off = Skill {
+            name: "off".into(),
+            in_store: true,
+            enabled: HashMap::from([("a".into(), false)]),
+        };
+        let skill_empty = Skill {
+            name: "empty".into(),
+            in_store: true,
+            enabled: HashMap::new(),
+        };
+        assert!(skill_on.any_enabled());
+        assert!(!skill_off.any_enabled());
+        assert!(!skill_empty.any_enabled());
+    }
+
+    // ── count_files ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_count_files_nested() {
+        let sb = SkillSandbox::new("files");
+        sb.add_skill_dir("x");
+        sb.add_file_in("x", "README.md", "# X");
+        sb.add_file_in("x", "refs/a.md", "A");
+        sb.add_file_in("x", "refs/b.md", "B");
+
+        let count = count_files(&sb.base.join("x"));
+        assert_eq!(count, 4); // SKILL.md + README.md + a.md + b.md
+    }
+
+    #[test]
+    fn test_count_files_skips_git() {
+        let sb = SkillSandbox::new("gitcount");
+        sb.add_skill_dir("y");
+        sb.add_file_in("y", "refs/a.md", "A");
+        // Simulate .git
+        fs::create_dir_all(sb.base.join("y/.git")).unwrap();
+        fs::write(sb.base.join("y/.git/HEAD"), "ref").unwrap();
+
+        let count = count_files(&sb.base.join("y"));
+        assert_eq!(count, 2); // SKILL.md + refs/a.md (no .git/HEAD)
+    }
+
+    // ── load_descriptions ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_descriptions_truncates_long() {
+        let sb = SkillSandbox::new("desc");
+        let long_desc = "x".repeat(200);
+        sb.add_skill_dir_custom("long", &format!("---\nname: long\ndescription: {long_desc}\n---\n"));
+
+        let fm = parse_frontmatter(&sb.base.join("long/SKILL.md"));
+        let desc = fm.get("description").unwrap();
+        // Verify the truncation logic matches what load_descriptions does
+        let truncated = if desc.len() > 120 {
+            format!("{}...", &desc[..117])
+        } else {
+            desc.clone()
+        };
+        assert_eq!(truncated.len(), 120);
+        assert!(truncated.ends_with("..."));
+    }
+
+    // ── load_detail ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_detail_nonexistent() {
+        assert!(load_detail("absolutely-does-not-exist-xyz").is_none());
+    }
+
+    #[test]
+    fn test_load_detail_existing() {
+        // This tests against the real ~/.rig/skills/ store
+        // If no skills installed, skip gracefully
+        let store = crate::store::skill_store();
+        if !store.is_dir() { return; }
+
+        let Ok(entries) = fs::read_dir(&store) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if entry.path().join("SKILL.md").exists() {
+                let detail = load_detail(&name);
+                assert!(detail.is_some(), "load_detail failed for existing skill: {name}");
+                let d = detail.unwrap();
+                assert!(!d.name.is_empty());
+                assert!(d.store_path.exists());
+                return; // one is enough
+            }
+        }
+    }
+}
+

@@ -24,3 +24,26 @@ ehthumbs.db
 .claude/
 .bg-shell/
 .gsd/
+
+# ── GSD baseline (auto-generated) ──
+.gsd
+.gsd-id
+Thumbs.db
+*.code-workspace
+.env
+.env.*
+!.env.example
+node_modules/
+.next/
+dist/
+build/
+__pycache__/
+*.pyc
+.venv/
+venv/
+target/
+vendor/
+*.log
+coverage/
+.cache/
+tmp/

@@ -745,4 +745,353 @@ mod tests {
         assert_eq!(expanded.len(), 1);
         assert!(!expanded[0].to_string_lossy().contains('~'));
     }
+
+    // ── Agent ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_agent_resolved_skill_dir_global() {
+        let agent = Agent {
+            name: "Test".into(),
+            key: 't',
+            color: "White".into(),
+            skill_dir: PathBuf::from("~/.test/skills"),
+            project_skill_dir: None,
+            markers: vec![],
+        };
+        let resolved = agent.resolved_skill_dir(None);
+        assert!(!resolved.to_string_lossy().contains('~'));
+        assert!(resolved.to_string_lossy().contains(".test/skills"));
+    }
+
+    #[test]
+    fn test_agent_resolved_skill_dir_project() {
+        let agent = Agent {
+            name: "Test".into(),
+            key: 't',
+            color: "White".into(),
+            skill_dir: PathBuf::from("~/.test/skills"),
+            project_skill_dir: Some(PathBuf::from(".test/skills")),
+            markers: vec![],
+        };
+        let proj = PathBuf::from("/tmp/myproject");
+        let resolved = agent.resolved_skill_dir(Some(&proj));
+        assert_eq!(resolved, PathBuf::from("/tmp/myproject/.test/skills"));
+    }
+
+    #[test]
+    fn test_agent_resolved_skill_dir_no_project_skill_dir() {
+        let agent = Agent {
+            name: "Test".into(),
+            key: 't',
+            color: "White".into(),
+            skill_dir: PathBuf::from("~/.test/skills"),
+            project_skill_dir: None,
+            markers: vec![],
+        };
+        let proj = PathBuf::from("/tmp/myproject");
+        // Falls back to global skill_dir since project_skill_dir is None
+        let resolved = agent.resolved_skill_dir(Some(&proj));
+        assert!(resolved.to_string_lossy().contains(".test/skills"));
+        assert!(!resolved.to_string_lossy().contains("myproject"));
+    }
+
+    #[test]
+    fn test_agent_has_signal_in_marker() {
+        let tmp = std::env::temp_dir().join(format!("rig-agent-signal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(tmp.join(".claude"));
+        let agent = Agent {
+            name: "Test".into(),
+            key: 't',
+            color: "White".into(),
+            skill_dir: PathBuf::from("~/.test/skills"),
+            project_skill_dir: None,
+            markers: vec![".claude".into()],
+        };
+        assert!(agent.has_signal_in(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agent_no_signal() {
+        let tmp = std::env::temp_dir().join(format!("rig-agent-nosignal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let agent = Agent {
+            name: "Test".into(),
+            key: 't',
+            color: "White".into(),
+            skill_dir: PathBuf::from("~/.test/skills"),
+            project_skill_dir: None,
+            markers: vec![".claude".into()],
+        };
+        assert!(!agent.has_signal_in(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_agent_colors() {
+        let green = Agent { name: "G".into(), key: 'g', color: "Green".into(), skill_dir: PathBuf::from("~/.g"), project_skill_dir: None, markers: vec![] };
+        let cyan = Agent { name: "C".into(), key: 'c', color: "Cyan".into(), skill_dir: PathBuf::from("~/.c"), project_skill_dir: None, markers: vec![] };
+        let unknown = Agent { name: "U".into(), key: 'u', color: "Chartreuse".into(), skill_dir: PathBuf::from("~/.u"), project_skill_dir: None, markers: vec![] };
+        assert_eq!(green.color(), ratatui::style::Color::Green);
+        assert_eq!(cyan.color(), ratatui::style::Color::Cyan);
+        assert_eq!(unknown.color(), ratatui::style::Color::White);
+    }
+
+    // ── enable/disable with sandbox ──────────────────────────────────────
+
+    struct SkillSandbox {
+        store: PathBuf,
+        agent_dir: PathBuf,
+        project_dir: PathBuf,
+        tmp_base: PathBuf,
+    }
+
+    impl SkillSandbox {
+        fn new() -> Self {
+            let pid = std::process::id();
+            let tmp_base = std::env::temp_dir().join(format!("rig-store-test-{pid}"));
+            let _ = std::fs::remove_dir_all(&tmp_base);
+            let store = tmp_base.join("store");
+            let agent_dir = tmp_base.join("agent-skills");
+            let project_dir = tmp_base.join("project");
+            std::fs::create_dir_all(&store).unwrap();
+            std::fs::create_dir_all(&agent_dir).unwrap();
+            std::fs::create_dir_all(&project_dir).unwrap();
+            Self { store, agent_dir, project_dir, tmp_base }
+        }
+
+        fn add_store_skill(&self, name: &str) {
+            let dir = self.store.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+        }
+
+        fn agent(&self) -> Agent {
+            Agent {
+                name: "TestAgent".into(),
+                key: 't',
+                color: "White".into(),
+                skill_dir: self.agent_dir.clone(),
+                project_skill_dir: Some(PathBuf::from(".test/skills")),
+                markers: vec![],
+            }
+        }
+    }
+
+    impl Drop for SkillSandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.tmp_base);
+        }
+    }
+
+    #[test]
+    fn test_enable_creates_symlink() {
+        let sb = SkillSandbox::new();
+        sb.add_store_skill("hello");
+        let agent = sb.agent();
+        let store_path = sb.store.join("hello");
+
+        // Manually create symlink (bypass enable_skill which uses skill_store())
+        let link_dir = &sb.agent_dir;
+        let link = link_dir.join("hello");
+        std::os::unix::fs::symlink(&store_path, &link).unwrap();
+
+        assert!(link.exists());
+        let target = std::fs::read_link(&link).unwrap();
+        assert_eq!(target, store_path);
+    }
+
+    #[test]
+    fn test_symlink_overwrites_existing() {
+        let sb = SkillSandbox::new();
+        sb.add_store_skill("hello");
+        let store_path = sb.store.join("hello");
+        let link = sb.agent_dir.join("hello");
+
+        // Create initial symlink
+        std::os::unix::fs::symlink(&store_path, &link).unwrap();
+        assert!(link.exists());
+
+        // Recreate (should overwrite)
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&store_path, &link).unwrap();
+        assert!(link.exists());
+    }
+
+    #[test]
+    fn test_disable_removes_symlink() {
+        let sb = SkillSandbox::new();
+        sb.add_store_skill("hello");
+        let store_path = sb.store.join("hello");
+        let link = sb.agent_dir.join("hello");
+        std::os::unix::fs::symlink(&store_path, &link).unwrap();
+        assert!(link.exists());
+
+        // Remove
+        std::fs::remove_file(&link).unwrap();
+        assert!(!link.exists());
+        // Store should still exist
+        assert!(store_path.exists());
+    }
+
+    // ── MCP config I/O ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_read_mcp_json_empty() {
+        let tmp = std::env::temp_dir().join(format!("rig-mcp-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let path = tmp.join("empty.json");
+        std::fs::write(&path, "{}").unwrap();
+        let config = read_mcp_json(&path);
+        assert!(config.is_object());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_read_write_mcp_json_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("rig-mcp-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let path = tmp.join("mcp.json");
+        let config = serde_json::json!({
+            "mcpServers": {
+                "test-server": {
+                    "command": "node",
+                    "args": ["server.js"]
+                }
+            }
+        });
+        write_mcp_json(&path, &config).unwrap();
+        assert!(path.exists());
+
+        let read_back = read_mcp_json(&path);
+        let servers = read_back.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(servers.contains_key("test-server"));
+        assert_eq!(
+            servers["test-server"]["command"].as_str().unwrap(),
+            "node"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_delete_mcp_from_file() {
+        let tmp = std::env::temp_dir().join(format!("rig-mcp-del-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let path = tmp.join("mcp.json");
+        let config = serde_json::json!({
+            "mcpServers": {
+                "keep": {"command": "keep-cmd"},
+                "delete": {"command": "del-cmd"}
+            }
+        });
+        write_mcp_json(&path, &config).unwrap();
+
+        delete_mcp_from_file("delete", &path).unwrap();
+
+        let after = read_mcp_json(&path);
+        let servers = after.get("mcpServers").unwrap().as_object().unwrap();
+        assert!(servers.contains_key("keep"));
+        assert!(!servers.contains_key("delete"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_delete_mcp_from_file_nonexistent() {
+        let tmp = std::env::temp_dir().join(format!("rig-mcp-nodel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let path = tmp.join("mcp.json");
+        write_mcp_json(&path, &serde_json::json!({"mcpServers": {}})).unwrap();
+
+        // Should not error on missing key
+        delete_mcp_from_file("absent", &path).unwrap();
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_delete_mcp_from_file_missing_file() {
+        // Should not error on missing file
+        let result = delete_mcp_from_file("x", &PathBuf::from("/tmp/does-not-exist-rig-test"));
+        assert!(result.is_ok());
+    }
+
+    // ── is_project_dir ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_project_dir_rejects_container() {
+        let tmp = std::env::temp_dir().join(format!("rig-container-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // Create 3+ subdirs with .git → treated as workspace container
+        for i in 0..4 {
+            let _ = std::fs::create_dir_all(tmp.join(format!("proj{i}/.git")));
+        }
+        assert!(!is_project_dir(&tmp));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_is_project_dir_rejects_home() {
+        assert!(!is_project_dir(&home()));
+    }
+
+    // ── RigConfig serialization ───────────────────────────────────────────
+
+    #[test]
+    fn test_config_serialization_roundtrip() {
+        let mut config = RigConfig::default();
+        config.projects.push(ProjectEntry {
+            name: "test-proj".into(),
+            path: PathBuf::from("/tmp/test-proj"),
+        });
+        config.disabled_mcps.insert("path::server".into());
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: RigConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.projects.len(), 1);
+        assert_eq!(parsed.projects[0].name, "test-proj");
+        assert!(parsed.disabled_mcps.contains("path::server"));
+    }
+
+    #[test]
+    fn test_config_default_agents_complete() {
+        let config = RigConfig::default();
+        let names: Vec<&str> = config.agents.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"Claude"), "Missing Claude agent");
+        assert!(names.contains(&"Cursor"), "Missing Cursor agent");
+        assert!(names.contains(&"Codex"), "Missing Codex agent");
+        assert!(names.contains(&"Windsurf"), "Missing Windsurf agent");
+        assert!(names.contains(&"Cline"), "Missing Cline agent");
+        assert!(names.contains(&"Copilot"), "Missing Copilot agent");
+        assert!(names.contains(&"Gemini"), "Missing Gemini agent");
+        assert!(names.contains(&"Roo"), "Missing Roo agent");
+        assert_eq!(config.agents.len(), 8);
+    }
+
+    #[test]
+    fn test_agents_have_unique_keys() {
+        let config = RigConfig::default();
+        let keys: std::collections::HashSet<char> = config.agents.iter().map(|a| a.key).collect();
+        assert_eq!(keys.len(), config.agents.len(), "Agent keys must be unique");
+    }
+
+    #[test]
+    fn test_agents_have_skill_dirs() {
+        let config = RigConfig::default();
+        for agent in &config.agents {
+            assert!(!agent.skill_dir.to_string_lossy().is_empty(), "{} has no skill_dir", agent.name);
+            assert!(agent.skill_dir.to_string_lossy().contains("/"), "{} skill_dir looks wrong", agent.name);
+        }
+    }
 }

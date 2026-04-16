@@ -174,6 +174,9 @@ pub struct App {
 
     pub sort_mode: SortMode,
 
+    /// Persistent filter query. Stays active after exiting Mode::Filter.
+    pub filter: String,
+
     /// Cached skill descriptions (name → first line of SKILL.md description)
     pub skill_descriptions: HashMap<String, String>,
     /// Cached security verdicts (name → Verdict)
@@ -199,6 +202,7 @@ impl App {
             sidebar_state: ListState::default(),
             status: None,
             sort_mode: SortMode::default(),
+            filter: String::new(),
             skill_descriptions: HashMap::new(),
             security_cache: HashMap::new(),
             should_quit: false,
@@ -243,10 +247,7 @@ impl App {
     // ── Filtered views ──────────────────────────────────────────────────
 
     pub fn filter_query(&self) -> &str {
-        match &self.mode {
-            Mode::Filter(q) => q.as_str(),
-            _ => "",
-        }
+        &self.filter
     }
 
     pub fn filtered_skills(&self) -> Vec<&Skill> {

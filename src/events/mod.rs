@@ -2,7 +2,7 @@ pub mod matrix;
 pub mod mcp;
 pub mod project;
 
-use crossterm::event::{Event, KeyCode, KeyEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{App, Focus, Mode, Screen, Status};
 use crate::installer;
@@ -60,24 +60,70 @@ pub fn handle_event(app: &mut App, ev: Event) {
     }
 
     // ── Filter mode: capture all keys ──────────────────
-    if let Mode::Filter(ref mut query) = app.mode {
+    if matches!(app.mode, Mode::Filter(_)) {
         match key.code {
             KeyCode::Esc => {
+                // Discard edits — revert filter and exit.
+                app.filter.clear();
                 app.mode = Mode::Normal;
+                app.clamp_matrix();
+                clamp_mcp_selection(app);
             }
             KeyCode::Enter => {
-                // Keep the filter active? No — we exit filter mode.
-                // The filtered_skills/mcp will show unfiltered again.
+                // Commit filter; stay applied after exit.
                 app.mode = Mode::Normal;
             }
             KeyCode::Backspace => {
-                query.pop();
-                if query.is_empty() {
-                    app.mode = Mode::Normal;
+                if let Mode::Filter(ref mut q) = app.mode {
+                    q.pop();
+                }
+                app.filter.pop();
+                app.clamp_matrix();
+                clamp_mcp_selection(app);
+            }
+            // Navigate underlying list while filter is active
+            // Arrow keys always navigate; Ctrl+j/k also navigate (vim-friendly)
+            KeyCode::Down => navigate_down(app),
+            KeyCode::Up => navigate_up(app),
+            KeyCode::Right => {
+                if let Screen::Matrix = app.screen {
+                    let col_count = app.matrix_columns().len();
+                    if col_count > 0 && app.matrix.cursor_col < col_count - 1 {
+                        app.matrix.cursor_col += 1;
+                        let visible = app.matrix.visible_cols;
+                        if visible > 0
+                            && app.matrix.cursor_col >= app.matrix.scroll_col + visible
+                        {
+                            app.matrix.scroll_col = app.matrix.cursor_col - visible + 1;
+                        }
+                    }
+                }
+            }
+            KeyCode::Left => {
+                if let Screen::Matrix = app.screen {
+                    if app.matrix.cursor_col > 0 {
+                        app.matrix.cursor_col -= 1;
+                        if app.matrix.cursor_col < app.matrix.scroll_col {
+                            app.matrix.scroll_col = app.matrix.cursor_col;
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Ctrl+j/k/n/p navigate while typing — don't append to filter
+                match c {
+                    'j' | 'n' => navigate_down(app),
+                    'k' | 'p' => navigate_up(app),
+                    _ => {}
                 }
             }
             KeyCode::Char(c) => {
-                query.push(c);
+                if let Mode::Filter(ref mut q) = app.mode {
+                    q.push(c);
+                }
+                app.filter.push(c);
+                app.clamp_matrix();
+                clamp_mcp_selection(app);
             }
             _ => {}
         }
@@ -116,7 +162,17 @@ pub fn handle_event(app: &mut App, ev: Event) {
             return;
         }
         KeyCode::Char('/') => {
-            app.mode = Mode::Filter(String::new());
+            app.mode = Mode::Filter(app.filter.clone());
+            return;
+        }
+        KeyCode::Char('\\') => {
+            // Clear persistent filter
+            if !app.filter.is_empty() {
+                app.filter.clear();
+                app.clamp_matrix();
+                clamp_mcp_selection(app);
+                app.set_status(Status::info("Filter cleared"));
+            }
             return;
         }
         KeyCode::Char('i') => {
@@ -191,6 +247,54 @@ pub fn handle_event(app: &mut App, ev: Event) {
         Screen::Help => {
             // Help screen: Esc/? already handled above
         }
+    }
+}
+
+fn navigate_down(app: &mut App) {
+    match app.screen {
+        Screen::Matrix => {
+            let len = app.filtered_skills().len();
+            if len > 0 && app.matrix.cursor_row < len - 1 {
+                app.matrix.cursor_row += 1;
+            }
+        }
+        Screen::Mcp => {
+            let len = app.filtered_mcp().len();
+            let cur = app.list_state.selected().unwrap_or(0);
+            if cur < len.saturating_sub(1) {
+                app.list_state.select(Some(cur + 1));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn navigate_up(app: &mut App) {
+    match app.screen {
+        Screen::Matrix => {
+            if app.matrix.cursor_row > 0 {
+                app.matrix.cursor_row -= 1;
+            }
+        }
+        Screen::Mcp => {
+            let cur = app.list_state.selected().unwrap_or(0);
+            if cur > 0 {
+                app.list_state.select(Some(cur - 1));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn clamp_mcp_selection(app: &mut App) {
+    let len = app.filtered_mcp().len();
+    if len == 0 {
+        app.list_state.select(Some(0));
+        return;
+    }
+    let cur = app.list_state.selected().unwrap_or(0);
+    if cur >= len {
+        app.list_state.select(Some(len - 1));
     }
 }
 

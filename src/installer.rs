@@ -1216,3 +1216,510 @@ pub fn print_install_help() {
     println!("  rig install https://github.com/obra/superpowers/tree/main/skills/commit");
     println!("  rig install ./my-skill --force");
 }
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    // ── parse_source ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_github_shorthand() {
+        let s = parse_source("anthropics/skills").unwrap();
+        assert_eq!(s.owner, "anthropics");
+        assert_eq!(s.repo, "skills");
+        assert_eq!(s.clone_url, "https://github.com/anthropics/skills.git");
+        assert_eq!(s.ssh_url, "git@github.com:anthropics/skills.git");
+        assert!(!s.is_local);
+        assert!(s.local_path.is_none());
+        assert!(s.git_ref.is_none());
+        assert!(s.subpath.is_none());
+    }
+
+    #[test]
+    fn test_parse_github_prefix() {
+        let s = parse_source("github:owner/repo").unwrap();
+        assert_eq!(s.owner, "owner");
+        assert_eq!(s.repo, "repo");
+        assert!(!s.is_local);
+    }
+
+    #[test]
+    fn test_parse_github_with_branch() {
+        let s = parse_source("github:owner/repo#develop").unwrap();
+        assert_eq!(s.git_ref.as_deref(), Some("develop"));
+        assert!(s.subpath.is_none());
+    }
+
+    #[test]
+    fn test_parse_github_with_branch_and_subpath() {
+        let s = parse_source("github:owner/repo#main:skills/commit").unwrap();
+        assert_eq!(s.git_ref.as_deref(), Some("main"));
+        assert_eq!(s.subpath.as_deref(), Some("skills/commit"));
+    }
+
+    #[test]
+    fn test_parse_github_with_subpath_no_ref() {
+        let s = parse_source("github:owner/repo:skills/hello").unwrap();
+        assert!(s.git_ref.is_none());
+        assert_eq!(s.subpath.as_deref(), Some("skills/hello"));
+    }
+
+    #[test]
+    fn test_parse_https_url() {
+        let s = parse_source("https://github.com/owner/repo").unwrap();
+        assert_eq!(s.owner, "owner");
+        assert_eq!(s.repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_https_url_with_tree_branch() {
+        let s = parse_source("https://github.com/owner/repo/tree/main").unwrap();
+        assert_eq!(s.owner, "owner");
+        assert_eq!(s.repo, "repo");
+        assert_eq!(s.git_ref.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_parse_https_url_with_tree_branch_and_path() {
+        let s = parse_source("https://github.com/owner/repo/tree/main/skills/commit").unwrap();
+        assert_eq!(s.owner, "owner");
+        assert_eq!(s.repo, "repo");
+        assert_eq!(s.git_ref.as_deref(), Some("main"));
+        assert_eq!(s.subpath.as_deref(), Some("skills/commit"));
+    }
+
+    #[test]
+    fn test_parse_https_url_trailing_slash() {
+        let s = parse_source("https://github.com/owner/repo/").unwrap();
+        assert_eq!(s.owner, "owner");
+        assert_eq!(s.repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_local_absolute() {
+        let s = parse_source("/tmp/my-skill").unwrap();
+        assert!(s.is_local);
+        assert_eq!(s.local_path.as_deref(), Some(std::path::Path::new("/tmp/my-skill")));
+    }
+
+    #[test]
+    fn test_parse_local_relative_dot() {
+        let s = parse_source("./my-skill").unwrap();
+        assert!(s.is_local);
+        assert!(s.local_path.is_some());
+    }
+
+    #[test]
+    fn test_parse_local_relative_double_dot() {
+        let s = parse_source("../my-skill").unwrap();
+        assert!(s.is_local);
+    }
+
+    #[test]
+    fn test_parse_local_tilde() {
+        let s = parse_source("~/skills/my-skill").unwrap();
+        assert!(s.is_local);
+        // Should expand ~
+        let path = s.local_path.unwrap();
+        assert!(!path.to_string_lossy().starts_with('~'));
+    }
+
+    #[test]
+    fn test_parse_strips_git_suffix() {
+        let s = parse_source("owner/repo.git").unwrap();
+        assert_eq!(s.repo, "repo");
+    }
+
+    #[test]
+    fn test_parse_rejects_no_slash() {
+        assert!(parse_source("justaname").is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_empty() {
+        assert!(parse_source("").is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_traversal() {
+        assert!(parse_source("owner/../repo").is_err());
+        assert!(parse_source("own..er/repo").is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_null_bytes() {
+        assert!(parse_source("owner\0/repo").is_err());
+    }
+
+    #[test]
+    fn test_parse_rejects_very_long_name() {
+        let long = "a".repeat(200);
+        let input = format!("{long}/repo");
+        assert!(parse_source(&input).is_err());
+    }
+
+    // ── canonical_id ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_canonical_id_github_no_ref() {
+        let s = parse_source("github:owner/repo").unwrap();
+        assert_eq!(s.canonical_id(), "github:owner/repo");
+    }
+
+    #[test]
+    fn test_canonical_id_github_with_ref() {
+        let s = parse_source("github:owner/repo#v1").unwrap();
+        assert_eq!(s.canonical_id(), "github:owner/repo#v1");
+    }
+
+    #[test]
+    fn test_canonical_id_github_with_ref_and_subpath() {
+        let s = parse_source("github:owner/repo#main:skills/x").unwrap();
+        assert_eq!(s.canonical_id(), "github:owner/repo#main:skills/x");
+    }
+
+    #[test]
+    fn test_canonical_id_local() {
+        let s = parse_source("/tmp/skill").unwrap();
+        assert!(s.canonical_id().starts_with("local:"));
+    }
+
+    // ── sanitise_name ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitise_normal() {
+        assert_eq!(sanitise_name("my-skill").unwrap(), "my-skill");
+        assert_eq!(sanitise_name("my_skill").unwrap(), "my_skill");
+        assert_eq!(sanitise_name("MySkill123").unwrap(), "MySkill123");
+    }
+
+    #[test]
+    fn test_sanitise_rejects_empty() {
+        assert!(sanitise_name("").is_err());
+    }
+
+    #[test]
+    fn test_sanitise_rejects_traversal() {
+        assert!(sanitise_name("../evil").is_err());
+        assert!(sanitise_name("skill/../../etc").is_err());
+    }
+
+    #[test]
+    fn test_sanitise_rejects_backslash() {
+        assert!(sanitise_name("path\\to").is_err());
+    }
+
+    #[test]
+    fn test_sanitise_rejects_too_long() {
+        assert!(sanitise_name(&"x".repeat(200)).is_err());
+    }
+
+    // ── discover_skills ───────────────────────────────────────────────────
+
+    struct SkillRepo {
+        dir: std::path::PathBuf,
+    }
+
+    impl SkillRepo {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("rig-skill-repo-{}", name));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Self { dir }
+        }
+
+        fn add_skill(&self, name: &str, description: &str) {
+            let skill_dir = self.dir.join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {description}\n---\n# {name}\n"),
+            ).unwrap();
+        }
+
+        fn add_skill_without_frontmatter(&self, name: &str) {
+            let skill_dir = self.dir.join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(skill_dir.join("SKILL.md"), "# Just a skill\nNo frontmatter.\n").unwrap();
+        }
+
+        fn add_nested_skill(&self, path: &str, name: &str) {
+            let skill_dir = self.dir.join(path);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: nested\n---\n"),
+            ).unwrap();
+        }
+
+        fn add_file(&self, path: &str, content: &str) {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                fs::create_dir_all(self.dir.join(parent)).unwrap();
+            }
+            fs::write(self.dir.join(path), content).unwrap();
+        }
+    }
+
+    impl Drop for SkillRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn test_discover_single_skill() {
+        let repo = SkillRepo::new("single");
+        repo.add_skill("hello", "Says hello");
+        let skills = discover_skills(&repo.dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "hello");
+        assert_eq!(skills[0].description, "Says hello");
+    }
+
+    #[test]
+    fn test_discover_multiple_skills() {
+        let repo = SkillRepo::new("multi");
+        repo.add_skill("alpha", "First skill");
+        repo.add_skill("beta", "Second skill");
+        repo.add_skill("gamma", "Third skill");
+        let skills = discover_skills(&repo.dir);
+        assert_eq!(skills.len(), 3);
+        // Should be sorted by name
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn test_discover_no_skills() {
+        let repo = SkillRepo::new("empty");
+        repo.add_file("README.md", "just a readme");
+        let skills = discover_skills(&repo.dir);
+        assert!(skills.is_empty());
+    }
+
+    #[test]
+    fn test_discover_skill_without_frontmatter_uses_dir_name() {
+        let repo = SkillRepo::new("nofm");
+        repo.add_skill_without_frontmatter("my-skill");
+        let skills = discover_skills(&repo.dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "my-skill");
+        assert_eq!(skills[0].description, "");
+    }
+
+    #[test]
+    fn test_discover_nested_skills() {
+        let repo = SkillRepo::new("nested");
+        repo.add_nested_skill("skills/commit", "commit");
+        repo.add_nested_skill("skills/review", "review");
+        let skills = discover_skills(&repo.dir);
+        assert_eq!(skills.len(), 2);
+        let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"commit"));
+        assert!(names.contains(&"review"));
+    }
+
+    #[test]
+    fn test_discover_ignores_dotfiles() {
+        let repo = SkillRepo::new("dots");
+        repo.add_skill("real-skill", "visible");
+        // Create a skill in a hidden dir
+        let hidden = repo.dir.join(".hidden-skill");
+        fs::create_dir_all(&hidden).unwrap();
+        fs::write(hidden.join("SKILL.md"), "---\nname: hidden\n---\n").unwrap();
+        let skills = discover_skills(&repo.dir);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "real-skill");
+    }
+
+    #[test]
+    fn test_discover_ignores_git_dir() {
+        let repo = SkillRepo::new("gitdir");
+        repo.add_skill("skill", "visible");
+        let git_skill = repo.dir.join(".git/skills/evil");
+        fs::create_dir_all(&git_skill).unwrap();
+        fs::write(git_skill.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
+        let skills = discover_skills(&repo.dir);
+        assert_eq!(skills.len(), 1);
+    }
+
+    // ── extract_frontmatter_field ─────────────────────────────────────────
+
+    #[test]
+    fn test_extract_frontmatter_name() {
+        let content = "---\nname: my-skill\ndescription: test\n---\nBody";
+        assert_eq!(
+            extract_frontmatter_field(content, "name"),
+            Some("my-skill".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_frontmatter_quoted_value() {
+        let content = "---\nname: \"My Skill\"\n---\n";
+        assert_eq!(
+            extract_frontmatter_field(content, "name"),
+            Some("My Skill".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_frontmatter_single_quoted() {
+        let content = "---\nname: 'My Skill'\n---\n";
+        assert_eq!(
+            extract_frontmatter_field(content, "name"),
+            Some("My Skill".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_frontmatter_missing_field() {
+        let content = "---\nname: x\n---\n";
+        assert_eq!(extract_frontmatter_field(content, "description"), None);
+    }
+
+    #[test]
+    fn test_extract_frontmatter_no_frontmatter() {
+        let content = "Just a plain file\nNo frontmatter at all";
+        assert_eq!(extract_frontmatter_field(content, "name"), None);
+    }
+
+    #[test]
+    fn test_extract_frontmatter_empty_value() {
+        let content = "---\nname:\n---\n";
+        assert_eq!(extract_frontmatter_field(content, "name"), None);
+    }
+
+    // ── source_to_clone_url ───────────────────────────────────────────────
+
+    #[test]
+    fn test_source_to_clone_url_github() {
+        assert_eq!(
+            source_to_clone_url("github:owner/repo"),
+            Some("https://github.com/owner/repo.git".into())
+        );
+    }
+
+    #[test]
+    fn test_source_to_clone_url_github_with_ref() {
+        assert_eq!(
+            source_to_clone_url("github:owner/repo#v1"),
+            Some("https://github.com/owner/repo.git".into())
+        );
+    }
+
+    #[test]
+    fn test_source_to_clone_url_github_with_subpath() {
+        assert_eq!(
+            source_to_clone_url("github:owner/repo:skills/x"),
+            Some("https://github.com/owner/repo.git".into())
+        );
+    }
+
+    #[test]
+    fn test_source_to_clone_url_non_github() {
+        assert_eq!(source_to_clone_url("local:/tmp/skill"), None);
+    }
+
+    // ── short ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_short_hash() {
+        assert_eq!(short("abc123def456"), "abc123d");
+        assert_eq!(short("abcdef"), "abcdef");
+        assert_eq!(short(""), "");
+    }
+
+    // ── do_install (with temp dirs) ───────────────────────────────────────
+
+    struct InstallSandbox {
+        store: std::path::PathBuf,
+        agent_dir: std::path::PathBuf,
+        source_dir: std::path::PathBuf,
+        tmp_base: std::path::PathBuf,
+    }
+
+    impl InstallSandbox {
+        fn new() -> Self {
+            let tmp_base = std::env::temp_dir().join(format!("rig-install-test-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&tmp_base);
+            let store = tmp_base.join("store");
+            let agent_dir = tmp_base.join("agent-skills");
+            let source_dir = tmp_base.join("source/my-skill");
+            fs::create_dir_all(&store).unwrap();
+            fs::create_dir_all(&agent_dir).unwrap();
+            fs::create_dir_all(&source_dir).unwrap();
+            fs::write(
+                source_dir.join("SKILL.md"),
+                "---\nname: my-skill\ndescription: test skill\n---\n# My Skill\n",
+            ).unwrap();
+            Self { store, agent_dir, source_dir, tmp_base }
+        }
+
+        fn agent(&self) -> Agent {
+            Agent {
+                name: "TestAgent".into(),
+                key: 't',
+                color: "Green".into(),
+                skill_dir: self.agent_dir.clone(),
+                project_skill_dir: None,
+                markers: vec![],
+            }
+        }
+
+        fn parsed_source(&self) -> ParsedSource {
+            ParsedSource {
+                owner: "local".into(),
+                repo: "my-skill".into(),
+                git_ref: None,
+                subpath: None,
+                clone_url: String::new(),
+                ssh_url: String::new(),
+                is_local: true,
+                local_path: Some(self.source_dir.clone()),
+            }
+        }
+    }
+
+    impl Drop for InstallSandbox {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.tmp_base);
+        }
+    }
+
+    #[test]
+    fn test_do_install_copies_to_store() {
+        // We can't easily override skill_store() so test the logic directly
+        let sb = InstallSandbox::new();
+        let agent = sb.agent();
+        let parsed = sb.parsed_source();
+
+        // Manually test copy + symlink logic
+        let store_path = sb.store.join("my-skill");
+        copy_dir(&sb.source_dir, &store_path).unwrap();
+        assert!(store_path.join("SKILL.md").exists());
+
+        let link = sb.agent_dir.join("my-skill");
+        std::os::unix::fs::symlink(&store_path, &link).unwrap();
+        assert!(link.exists());
+        let target = fs::read_link(&link).unwrap();
+        assert_eq!(target, store_path);
+    }
+
+    #[test]
+    fn test_copy_dir_excludes_git() {
+        let sb = InstallSandbox::new();
+        let git_dir = sb.source_dir.join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main").unwrap();
+
+        let dest = sb.store.join("my-skill");
+        copy_dir(&sb.source_dir, &dest).unwrap();
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join(".git").exists());
+    }
+}

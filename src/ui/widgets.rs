@@ -147,7 +147,7 @@ pub fn draw_preview_bar(app: &App, f: &mut Frame, area: Rect) {
 pub fn draw_filter_bar(app: &App, f: &mut Frame, area: Rect) {
     match &app.mode {
         Mode::Filter(q) => {
-            let text = format!("/{}", q);
+            let text = format!("/{}_", q);
             f.render_widget(
                 Paragraph::new(text)
                     .style(Style::default().fg(Color::Yellow).bg(Color::DarkGray)),
@@ -162,7 +162,16 @@ pub fn draw_filter_bar(app: &App, f: &mut Frame, area: Rect) {
                 area,
             );
         }
-        _ => {}
+        _ => {
+            if !app.filter.is_empty() {
+                let text = format!("filter: /{}  [\\] clear  [/] edit", app.filter);
+                f.render_widget(
+                    Paragraph::new(text)
+                        .style(Style::default().fg(Color::Yellow)),
+                    area,
+                );
+            }
+        }
     }
 }
 

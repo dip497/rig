@@ -11,28 +11,52 @@ A terminal UI for managing Claude AI skills and MCP servers.
 
 ## Installation
 
-### Download Pre-built Binary
+### One-line install (Linux & macOS)
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/dip497/rig/releases):
-
-- **Linux**: `rig-linux-x86_64`
-- **macOS Intel**: `rig-macos-x86_64`
-- **macOS Apple Silicon**: `rig-macos-aarch64`
-- **Windows**: `rig-windows-x86_64.exe`
-
-Make it executable (Linux/macOS):
 ```bash
-chmod +x rig-linux-x86_64
-./rig-linux-x86_64
+curl -fsSL https://raw.githubusercontent.com/dipendra-sharma/rig/main/install.sh | sh
 ```
 
-### Build from Source
+Installs to `~/.local/bin/rig` by default. Override with `RIG_INSTALL_DIR`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dipendra-sharma/rig/main/install.sh | RIG_INSTALL_DIR=/usr/local/bin sh
+```
+
+### Download binary
+
+Download from [GitHub Releases](https://github.com/dipendra-sharma/rig/releases):
+
+| Platform | File |
+|----------|------|
+| Linux x86_64 | `rig-x86_64-unknown-linux-musl.tar.gz` |
+| Linux ARM64 | `rig-aarch64-unknown-linux-musl.tar.gz` |
+| macOS Intel | `rig-x86_64-apple-darwin.tar.gz` |
+| macOS Apple Silicon | `rig-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `rig-x86_64-pc-windows-msvc.zip` |
+
+```bash
+tar -xzf rig-x86_64-unknown-linux-musl.tar.gz
+chmod +x rig
+./rig
+```
+
+The Linux builds are statically linked (musl) — zero dependencies, works on any distro.
+
+### Build from source
 
 Requires Rust 1.70+:
 
 ```bash
 cargo build --release
 ./target/release/rig
+```
+
+For a portable static Linux binary:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
 ```
 
 ## Usage
