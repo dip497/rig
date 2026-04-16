@@ -267,6 +267,15 @@ mod tests {
         fn add_file_in(&self, skill: &str, file: &str, content: &str) {
             let dir = self.base.join(skill);
             fs::create_dir_all(&dir).unwrap();
+            // Ensure SKILL.md exists so it counts as a skill dir
+            if !dir.join("SKILL.md").exists() {
+                fs::write(dir.join("SKILL.md"), format!("---\nname: {skill}\n---\n")).unwrap();
+            }
+            if let Some(parent) = std::path::Path::new(file).parent() {
+                if parent != std::path::Path::new("") {
+                    fs::create_dir_all(dir.join(parent)).unwrap();
+                }
+            }
             fs::write(dir.join(file), content).unwrap();
         }
     }
@@ -419,8 +428,8 @@ mod tests {
     #[test]
     fn test_count_files_nested() {
         let sb = SkillSandbox::new("files");
-        sb.add_skill_dir("x");
-        sb.add_file_in("x", "README.md", "# X");
+        sb.add_skill_dir("x"); // creates SKILL.md
+        sb.add_file_in("x", "README.md", "# X"); // add_file_in ensures SKILL.md exists
         sb.add_file_in("x", "refs/a.md", "A");
         sb.add_file_in("x", "refs/b.md", "B");
 

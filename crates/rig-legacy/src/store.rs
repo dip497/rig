@@ -849,7 +849,11 @@ mod tests {
     impl SkillSandbox {
         fn new() -> Self {
             let pid = std::process::id();
-            let tmp_base = std::env::temp_dir().join(format!("rig-store-test-{pid}"));
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let tmp_base = std::env::temp_dir().join(format!("rig-store-test-{pid}-{ts}"));
             let _ = std::fs::remove_dir_all(&tmp_base);
             let store = tmp_base.join("store");
             let agent_dir = tmp_base.join("agent-skills");

@@ -1,135 +1,77 @@
+<div align="center">
+
 # Rig
 
-A terminal UI for managing Claude AI skills and MCP servers.
+**The distribution & management layer for agent coding context.**
 
-## Features
+One tool to install, pin, sync, and share skills, MCP servers, rules, hooks,
+subagents, and plugins across every agent coding tool — Claude Code, Codex,
+and more — with per-project and global scope.
 
-- Manage AI skills in a modern TUI interface
-- Configure and control MCP (Model Context Protocol) servers
-- Project-based skill organization
-- Interactive matrix view for skill/project relationships
+[Docs](./docs/introduction.md) · [Vision](./docs/vision.md) · [Concepts](./docs/concepts.md) · [Architecture](./docs/architecture.md) · [Roadmap](./docs/roadmap.md) · [Decisions](./docs/DECISIONS.md) · [Session warmup](./docs/SESSION-START.md)
 
-## Installation
+</div>
 
-### One-line install (Linux & macOS)
+---
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/dipendra-sharma/rig/main/install.sh | sh
-```
+> ⚠️ **Rig is under active rewrite.** The pre-0.2 TUI-only codebase has been
+> archived to [`crates/rig-legacy/`](./crates/rig-legacy/) as reference. The new
+> cross-agent manager is being built in the workspace alongside it. Public
+> repo, quiet launch — watch or star to follow along.
 
-Installs to `~/.local/bin/rig` by default. Override with `RIG_INSTALL_DIR`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/dipendra-sharma/rig/main/install.sh | RIG_INSTALL_DIR=/usr/local/bin sh
-```
-
-### Download binary
-
-Download from [GitHub Releases](https://github.com/dipendra-sharma/rig/releases):
-
-| Platform | File |
-|----------|------|
-| Linux x86_64 | `rig-x86_64-unknown-linux-musl.tar.gz` |
-| Linux ARM64 | `rig-aarch64-unknown-linux-musl.tar.gz` |
-| macOS Intel | `rig-x86_64-apple-darwin.tar.gz` |
-| macOS Apple Silicon | `rig-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `rig-x86_64-pc-windows-msvc.zip` |
+## What Rig does (once M1 ships)
 
 ```bash
-tar -xzf rig-x86_64-unknown-linux-musl.tar.gz
-chmod +x rig
-./rig
+rig init            # detect stack, suggest bundles, pick target agents
+rig add skill react-review --source github:acme/skills
+rig install         # materialise everything from .rig/rig.toml
+rig sync            # drift-safe reconcile across Claude Code + Codex
+rig status          # what's installed, drifted, orphaned
 ```
 
-The Linux builds are statically linked (musl) — zero dependencies, works on any distro.
+- **Portable.** One `rig.toml` → same stack on Claude Code and Codex.
+- **Drift-safe.** Rig never overwrites your local edits silently.
+- **GitOps-friendly.** Commit `.rig/rig.toml` and `.rig/rig.lock`, team syncs automatically.
+- **Pluggable.** New agent, new unit type, new source, new UI — all ship as
+  plugins. Core never needs to change.
 
-### Build from source
+## Why Rig exists
 
-Requires Rust 1.70+:
+Agent coding tools are exploding. Each one has its own home for skills
+(`~/.claude/skills/`, `~/.codex/skills/`), MCPs (`.mcp.json` vs TOML),
+rules (`CLAUDE.md` vs `AGENTS.md`), hooks, subagents, plugins. Teams juggle
+two or three agents. Nothing today pins an entire stack, sync it across
+tools, detects drift, or lets a teammate clone your repo and pick up your
+agent setup in one command.
 
-```bash
-cargo build --release
-./target/release/rig
-```
+Rig is that layer. It sits **above** every agent's native mechanism (we
+consume Anthropic's plugin marketplace, Codex's config, community registries
+like Smithery) and **below** your team's shared config in git.
 
-For a portable static Linux binary:
+Read more in [docs/introduction.md](./docs/introduction.md).
 
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-```
+## Status
 
-## Usage
-
-Launch the TUI:
-
-```bash
-rig
-```
-
-### Migrating from `npx skills`
-
-If you have skills installed via `npx skills add`, migrate them into rig's store:
-
-```bash
-rig migrate
-```
-
-This will:
-- Move skills from `~/.agents/skills/` → `~/.rig/skills/`
-- Move config from `~/.config/rig/` → `~/.rig/`
-- Scan agent directories for loose skills
-- Create symlinks in all agent directories
-
-### Navigation
-
-- `Tab` - Switch between panels
-- Arrow keys - Navigate lists
-- `q` - Quit
-- `?` - Help
-
-## Configuration
-
-All rig data lives in `~/.rig/`:
-
-```
-~/.rig/
-├── config.json          # Settings, agents, projects
-└── skills/              # Central skill store
-    └── <skill-name>/
-        └── SKILL.md
-```
-
-Skills are enabled per-agent via symlinks:
-```
-~/.claude/skills/<name>/  →  ~/.rig/skills/<name>/   (enabled)
-```
-
-## Development
-
-### Build
-
-```bash
-cargo build
-```
-
-### Test
-
-```bash
-cargo test
-```
-
-### Lint
-
-```bash
-cargo clippy -- -D warnings
-cargo fmt --check
-```
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+- Current focus: workspace scaffolding and public-facing docs.
+- Next: `rig-core` unit taxonomy, manifest schema, Claude + Codex adapters.
+- Tracking: [docs/roadmap.md](./docs/roadmap.md).
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Dual-licensed under **MIT OR Apache-2.0** (core crates). See
+[LICENSE-MIT](./LICENSE-MIT), [LICENSE-APACHE](./LICENSE-APACHE), and
+[docs/terms.md](./docs/terms.md).
+
+## Contributing
+
+We're in early design. Issues are open for feedback on architecture and
+unit taxonomy. See [docs/contributing.md](./docs/contributing.md) before
+opening a PR.
+
+## Acknowledgements
+
+Rig builds on standards others have pioneered — [SKILL.md / Agent Skills](https://agentskills.io),
+[AGENTS.md](https://agents.md), [MCP](https://modelcontextprotocol.io),
+[MCPB](https://blog.modelcontextprotocol.io/posts/2025-11-20-adopting-mcpb/),
+and Anthropic's Claude Code plugin system. See
+[docs/comparison.md](./docs/comparison.md) for how Rig composes with each.

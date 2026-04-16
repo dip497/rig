@@ -1,32 +1,12 @@
 # Contributing to Rig
 
-## Getting Started
+The canonical contributor guide now lives at
+[**docs/contributing.md**](./docs/contributing.md). Start there.
 
-1. Fork the repository
-2. Clone your fork: `git clone https://github.com/yourusername/rig.git`
-3. Create a feature branch: `git checkout -b feature/your-feature`
+Quick summary while this file is here:
 
-## Development
-
-- Rust 1.70 or later required
-- Run tests before submitting: `cargo test`
-- Format code: `cargo fmt`
-- Check for issues: `cargo clippy -- -D warnings`
-
-## Submitting Changes
-
-1. Ensure all tests pass
-2. Ensure no clippy warnings
-3. Keep commits atomic and descriptive
-4. Submit a pull request with a clear description
-
-## Code Style
-
-- Follow Rust conventions
-- Use meaningful variable names
-- Add comments for non-obvious logic
-- Keep functions focused and testable
-
-## Issues
-
-Feel free to open issues for bugs, feature requests, or questions.
+- Rig is pre-scaffold. Open an issue before large PRs.
+- Run `cargo fmt`, `cargo clippy --workspace -- -D warnings`,
+  `cargo test --workspace` before submitting.
+- Be kind. See [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
+- Governance and decision-making: [docs/governance.md](./docs/governance.md).

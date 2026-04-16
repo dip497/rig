@@ -1,23 +1,67 @@
-[package]
-name = "rig"
-version = "0.1.0"
+[workspace]
+resolver = "2"
+members = [
+    "crates/rig-core",
+    "crates/rig-fs",
+    "crates/rig-source",
+    "crates/rig-sync",
+    "crates/rig-plugin-host",
+    "crates/rig-adapter-claude",
+    "crates/rig-adapter-codex",
+    "crates/rig-api",
+    "crates/rig-daemon",
+    "crates/rig-cli",
+    "crates/rig-gui",
+]
+default-members = [
+    "crates/rig-core",
+    "crates/rig-fs",
+    "crates/rig-source",
+    "crates/rig-sync",
+    "crates/rig-plugin-host",
+    "crates/rig-adapter-claude",
+    "crates/rig-adapter-codex",
+    "crates/rig-api",
+    "crates/rig-daemon",
+    "crates/rig-cli",
+    "crates/rig-gui",
+]
+exclude = ["crates/rig-legacy"]
+
+[workspace.package]
+version = "0.2.0-dev"
 edition = "2021"
-description = "Terminal UI for managing Claude AI skills and MCP servers"
-license = "MIT"
-authors = ["Dipendra Sharma"]
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/dipendra-sharma/rig"
 homepage = "https://github.com/dipendra-sharma/rig"
-keywords = ["cli", "tui", "ai", "mcp", "skills"]
-categories = ["command-line-utilities", "development-tools"]
+authors = ["Dipendra Sharma"]
+rust-version = "1.75"
 
-[dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
+[workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dirs = "6"
+toml = "0.8"
 anyhow = "1"
+thiserror = "2"
+dirs = "6"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "io-std"] }
+sha2 = "0.10"
+ratatui = "0.29"
+crossterm = "0.28"
 shellexpand = "3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Internal crate dependencies
+rig-core = { path = "crates/rig-core", version = "0.2.0-dev" }
+rig-fs = { path = "crates/rig-fs", version = "0.2.0-dev" }
+rig-source = { path = "crates/rig-source", version = "0.2.0-dev" }
+rig-sync = { path = "crates/rig-sync", version = "0.2.0-dev" }
+rig-plugin-host = { path = "crates/rig-plugin-host", version = "0.2.0-dev" }
+rig-adapter-claude = { path = "crates/rig-adapter-claude", version = "0.2.0-dev" }
+rig-adapter-codex = { path = "crates/rig-adapter-codex", version = "0.2.0-dev" }
+rig-api = { path = "crates/rig-api", version = "0.2.0-dev" }
 
 [profile.release]
 opt-level = 3

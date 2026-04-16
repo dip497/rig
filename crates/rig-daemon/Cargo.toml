@@ -1,0 +1,27 @@
+[package]
+name = "rig-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Optional background daemon that serves the rig-api to multiple frontends simultaneously."
+
+[[bin]]
+name = "rig-daemon"
+path = "src/main.rs"
+
+[dependencies]
+rig-core = { workspace = true }
+rig-api = { workspace = true }
+rig-fs = { workspace = true }
+rig-source = { workspace = true }
+rig-sync = { workspace = true }
+rig-plugin-host = { workspace = true }
+rig-adapter-claude = { workspace = true }
+rig-adapter-codex = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

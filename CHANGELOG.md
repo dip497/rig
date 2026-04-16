@@ -1,0 +1,39 @@
+# Changelog
+
+All notable changes to Rig are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased] — `0.2.0-dev`
+
+### Added
+
+- Workspace restructure into focused crates: `rig-core`, `rig-fs`,
+  `rig-source`, `rig-sync`, `rig-plugin-host`, `rig-adapter-claude`,
+  `rig-adapter-codex`, `rig-api`, `rig-daemon`, `rig-cli`, `rig-gui`.
+- Public-facing documentation (`docs/introduction.md`, `docs/vision.md`,
+  `docs/concepts.md`, `docs/architecture.md`, `docs/roadmap.md`,
+  `docs/philosophy.md`, `docs/comparison.md`, `docs/contributing.md`,
+  `docs/governance.md`, `docs/security.md`, `docs/faq.md`,
+  `docs/terms.md`).
+- Dual MIT / Apache-2.0 licensing.
+- `CODE_OF_CONDUCT.md`, `SECURITY.md`, refreshed `README.md`.
+
+### Changed
+
+- Project scope pivoted from "Claude-only TUI" to "cross-agent
+  distribution and management layer" (M1 targets Claude Code and Codex).
+- Pre-pivot codebase archived to `crates/rig-legacy/` as reference only;
+  excluded from the default workspace build.
+
+### Deprecated
+
+- Pre-0.2 `rig` binary (TUI-only, Claude-only). Replaced by `rig-cli`
+  (`rig` binary, cross-agent) once M1 lands.
+
+## [0.1.x] — pre-pivot
+
+- Terminal UI for managing Claude AI skills and MCP servers.
+- See git history and `crates/rig-legacy/` for details. No further
+  releases on this line.

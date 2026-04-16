@@ -1,0 +1,20 @@
+[package]
+name = "rig-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Rig desktop GUI (Tauri). Visual onboarding, bundle browser, drift diff, unit matrix."
+
+[[bin]]
+name = "rig-gui"
+path = "src/main.rs"
+
+[dependencies]
+rig-core = { workspace = true }
+rig-api = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+# tauri = { version = "2", features = [] }  # added when GUI work begins
