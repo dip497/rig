@@ -9,6 +9,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **First working `rig` CLI:** `init`, `install`, `sync`, `status`,
+  `list`, `uninstall`. Manifest + lockfile persisted at
+  `<scope>/.rig/`; drift detected via three-SHA model across runs.
+- **Cross-agent installs:** `--agent claude,codex` writes canonical
+  units into both `~/.claude/` and `~/.codex/` layouts, with
+  per-agent independent drift tracking.
+- **`rig-core`** canonical types: seven unit structs, `Adapter` +
+  `Converter<T>` traits, manifest and lockfile schemas, drift state
+  machine. Zero I/O, enforced by a PostToolUse hook.
+- **`rig-adapter-claude`** Skill + Rule + Command + Subagent
+  converters; install/uninstall/list/read_local/detect_drift.
+- **`rig-adapter-codex`** Skill + Rule converters; same adapter
+  surface, fully isolated from `rig-adapter-claude` (no cross-imports).
+- **`rig-fs`** atomic write primitive + content-hash helpers.
+- **`rig-source`** local source fetcher; github/git/npm/marketplace
+  stubbed with `Unsupported` until later wedges.
 - Workspace restructure into focused crates: `rig-core`, `rig-fs`,
   `rig-source`, `rig-sync`, `rig-plugin-host`, `rig-adapter-claude`,
   `rig-adapter-codex`, `rig-api`, `rig-daemon`, `rig-cli`, `rig-gui`.
