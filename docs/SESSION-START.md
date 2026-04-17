@@ -13,17 +13,26 @@ drift-safe sync, and pluggable extension points.
 
 ## Where we are right now
 
-- **Pivot done.** Old Claude-only TUI code archived to
-  `crates/rig-legacy/`, excluded from default build.
-- **Workspace scaffolded.** 11 new crates compile clean. No business
-  logic yet — only module stubs and crate manifests.
-- **Public docs done.** `README.md`, 12 files in `docs/`, dual
-  licensing, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`.
+As of `e89b4fc` on `refactor/cross-agent-pivot` (pushed to origin).
+
+- **First CLI wedge shipped.** `rig init / install / sync / status
+  / list / uninstall` all work end-to-end. Manifest + lockfile
+  persist at `<scope>/.rig/`.
+- **Cross-agent thesis proven live.** `rig install local:./skill
+  --agent claude,codex` writes into both `~/.claude/` and
+  `~/.codex/` with independent per-agent drift tracking.
+- **54 tests pass, clippy clean, zero cross-adapter imports.**
+  `rig-core` remains zero-I/O (hook-enforced).
+- **Supported matrix right now:**
+  - Claude Code: Skill, Rule, Command, Subagent
+  - Codex: Skill, Rule
+  - MCP / Hook / Plugin: stubbed, return `Unsupported`
+- **Sources:** local only. github / git / npm / marketplace still
+  return `Unsupported`. **Next wedge = github.**
 - **Dogfood in place.** `.claude/agents/` has 5 subagents,
-  `.claude/skills/` has 4 Rig-specific development skills, and
-  `.claude/settings.json` wires 5 hooks that enforce discipline.
-- **Nothing implemented.** No unit type is written, no adapter does
-  anything, no CLI command exists.
+  `.claude/skills/` has 4 Rig-specific dev skills,
+  `.claude/settings.json` wires 5 hooks. Hooks firing reliably;
+  skills + subagents used only sparingly — use them more.
 
 ## The 2-minute mental model
 
@@ -83,39 +92,44 @@ cargo fmt --all --check
 
 All four must pass before merge.
 
-## Next concrete work (as of last session)
+## Next concrete work
 
-Pending tasks (run `/task list` to see live state):
+Per ADR-015 we direct-execute. Ordered by value:
 
-- #3 UNITS.md — canonical unit taxonomy spec
-- #4 ADAPTER.md — trait contract
-- #5 MANIFEST.md — rig.toml schema
-- #6 LOCKFILE.md — rig.lock schema
-- #7 DRIFT.md — state machine
-- #8 RESOLVER.md — bundle / dependency algorithm
-- #9 SCOPE.md — global / project precedence
-- #10 GUI.md — Tauri UX (replaces previous TUI task)
-- #11 M1-SPEC.md — feature + acceptance
-- #12 TESTING.md — strategy
-- #13 PLUGIN-PROTOCOL.md — subprocess IPC contract
-- #15 API.md — rig-api contract for frontends
+1. **Github source** (#24) — `git2` shallow-clone into
+   `~/.rig/cache/<owner>/<repo>@<sha>/`, resolve ref via `ls-remote`.
+   Biggest blocker to real-world use.
+2. **`rig sync` drift resolution** (#7 extension) — currently
+   clobbers. Wire the five modes (keep / overwrite / diff-per-file /
+   snapshot-then-overwrite / cancel).
+3. **MCP + Hook support** — settings.json merge (per-agent). Risky:
+   touches user state. Design careful reconciliation first.
+4. **`rig-api` + `rig-gui`** (#15, #10) — Tauri frontend once the
+   RPC contract is stable. Specs for these go to docs/.
+5. **Bundle composition + SemVer intersection** (#8) — transitive
+   `bundles = [...]`, conflict diagnostics.
 
-These can be written spec-first, or back-filled after implementation.
-Current lean: **direct execute with minimal spec upfront, backfill
-specs as the API solidifies.** See `docs/DECISIONS.md` ADR-015.
+Backfill docs (#11, #12, #13) only when an external reader needs
+them — the code + rustdoc are the current source of truth.
 
 ## How to act in a new session
 
-1. Check the task list: `/task list` (see `TaskList` tool).
-2. Pick an in-progress task, or the next available pending one.
+1. `git status` — make sure the branch is clean or you know why not.
+2. Check the task list: `/task list`. Pick in-progress first, else
+   the next pending in the priority order above.
 3. Read only the relevant doc(s) in `docs/` — not all of them.
-4. Delegate research-heavy work to the `spec-writer` subagent (it
-   has Context7, Exa, and DeepWiki tools).
-5. Delegate architecture review to the `architecture-guardian`
-   subagent before merging any cross-crate change.
-6. Use `TaskCreate` / `TaskUpdate` for any work that spans more than
-   three steps.
-7. If a decision is non-trivial, log it in `docs/DECISIONS.md`.
+4. Use the dogfood (previous session skipped most of it):
+   - `rig-new-*` skills for scaffolding new unit types / adapters.
+   - `adapter-author` subagent for adapter impl.
+   - `architecture-guardian` subagent before any cross-crate merge.
+   - `test-author` subagent for fixture-heavy tests.
+   - `spec-writer` subagent when a doc actually needs writing
+     (has Context7 + Exa + DeepWiki).
+   - `docs-reviewer` subagent before committing doc changes.
+5. `TaskCreate` / `TaskUpdate` for work spanning 3+ steps.
+6. Log non-trivial decisions in `docs/DECISIONS.md`.
+7. Update `CHANGELOG.md` before each commit (the `changelog-reminder`
+   hook will nag on session stop — don't ignore).
 
 ## How to communicate
 
