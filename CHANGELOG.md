@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Tarball source** (`rig pack` + `.rig` install): `rig pack <dir>`
+  produces a deterministic gzipped tar (sorted entries, zeroed
+  mtime/uid/gid, gzip header mtime=0) — same input dir → byte-identical
+  output. `rig install ./skill.rig --agent claude,codex` extracts to a
+  tempdir and installs into both. Unlocks git-less sharing via email /
+  DM / S3 / pastebin. Bare filesystem paths (`./`, `/`, `~/`) now skip
+  the `local:` prefix.
 - **First working `rig` CLI:** `init`, `install`, `sync`, `status`,
   `list`, `uninstall`. Manifest + lockfile persisted at
   `<scope>/.rig/`; drift detected via three-SHA model across runs.

@@ -73,6 +73,10 @@ fn fetch_local(source: &Source, path: &Path) -> FetchResult<Fetched> {
         return Err(FetchError::MissingPath(path.to_path_buf()));
     }
 
+    if is_tarball(path) {
+        return fetch_tarball(source, path);
+    }
+
     let (root, detected) = detect(path)?;
     let files = if path.is_file() {
         vec![path.to_path_buf()]
@@ -83,18 +87,71 @@ fn fetch_local(source: &Source, path: &Path) -> FetchResult<Fetched> {
         })?
     };
 
+    let (native, hash_input) = read_files(&files, &root, path.is_file())?;
+
+    Ok(Fetched {
+        source: source.clone(),
+        source_sha: Sha256::of(&hash_input),
+        native: NativeLayout { files: native },
+        detected,
+    })
+}
+
+fn is_tarball(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    name.ends_with(".rig") || name.ends_with(".tar.gz") || name.ends_with(".tgz")
+}
+
+fn fetch_tarball(source: &Source, path: &Path) -> FetchResult<Fetched> {
+    let archive_bytes = std::fs::read(path).map_err(|s| FetchError::Io {
+        path: path.to_path_buf(),
+        source: s,
+    })?;
+    let source_sha = Sha256::of(&archive_bytes);
+
+    let temp = rig_fs::unpack_to_temp(path).map_err(|e| FetchError::Io {
+        path: path.to_path_buf(),
+        source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+    })?;
+
+    let (root, detected) = detect(temp.path())?;
+    let files = collect(&root).map_err(|source| FetchError::Io {
+        path: root.clone(),
+        source,
+    })?;
+    let (native, _) = read_files(&files, &root, false)?;
+
+    Ok(Fetched {
+        source: source.clone(),
+        source_sha,
+        native: NativeLayout { files: native },
+        detected,
+    })
+}
+
+fn read_files(
+    files: &[PathBuf],
+    root: &Path,
+    is_single: bool,
+) -> FetchResult<(Vec<NativeFile>, Vec<u8>)> {
     let mut native = Vec::with_capacity(files.len());
     let mut hash_input = Vec::new();
     for p in files {
-        let rel = if path.is_file() {
+        let rel = if is_single {
             p.file_name().unwrap().to_string_lossy().into_owned()
         } else {
-            p.strip_prefix(&root)
-                .unwrap_or(&p)
+            p.strip_prefix(root)
+                .unwrap_or(p)
                 .to_string_lossy()
                 .into_owned()
         };
-        let bytes = std::fs::read(&p).map_err(|source| FetchError::Io {
+        let bytes = std::fs::read(p).map_err(|source| FetchError::Io {
             path: p.clone(),
             source,
         })?;
@@ -107,13 +164,7 @@ fn fetch_local(source: &Source, path: &Path) -> FetchResult<Fetched> {
             bytes,
         });
     }
-
-    Ok(Fetched {
-        source: source.clone(),
-        source_sha: Sha256::of(&hash_input),
-        native: NativeLayout { files: native },
-        detected,
-    })
+    Ok((native, hash_input))
 }
 
 /// Return (`root_dir`, detected type). If `path` is a file (e.g. a
@@ -226,6 +277,34 @@ mod tests {
         };
         assert!(matches!(fetch(&src), Err(FetchError::Undetected(_))));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fetches_tarball() {
+        let src_dir = tempdir("tb-src");
+        fs::write(
+            src_dir.join("SKILL.md"),
+            "---\nname: tb\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        let out_dir = tempdir("tb-out");
+        let archive = out_dir.join("tb.rig");
+        rig_fs::pack_dir(&src_dir, &archive).unwrap();
+
+        let src = Source::Local {
+            path: archive.to_string_lossy().into_owned(),
+        };
+        let f = fetch(&src).unwrap();
+        assert_eq!(f.detected, Some(UnitType::Skill));
+        assert_eq!(f.native.files.len(), 1);
+        assert_eq!(f.native.files[0].relative_path, "SKILL.md");
+
+        // Deterministic source_sha: same tarball → same sha.
+        let g = fetch(&src).unwrap();
+        assert_eq!(f.source_sha, g.source_sha);
+
+        fs::remove_dir_all(&src_dir).ok();
+        fs::remove_dir_all(&out_dir).ok();
     }
 
     #[test]

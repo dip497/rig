@@ -50,6 +50,12 @@ impl Source {
     /// Returns [`SourceParseError`] when the scheme is unknown or the
     /// body is malformed for the declared scheme.
     pub fn parse(s: &str) -> Result<Self, SourceParseError> {
+        // Bare filesystem paths → implicit `local:` scheme.
+        if s.starts_with("./") || s.starts_with("../") || s.starts_with('/') || s.starts_with("~/")
+        {
+            return Ok(Self::Local { path: s.to_owned() });
+        }
+
         let (scheme, rest) = s
             .split_once(':')
             .ok_or_else(|| SourceParseError::MissingScheme(s.to_owned()))?;

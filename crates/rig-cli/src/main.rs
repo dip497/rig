@@ -3,6 +3,8 @@
 
 mod store;
 
+use std::path::PathBuf;
+
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -73,6 +75,14 @@ enum Command {
         target: String,
         #[arg(long, value_enum, default_value_t = CliScope::Project)]
         scope: CliScope,
+    },
+    /// Pack a unit directory into a deterministic `.rig` tarball for
+    /// git-less sharing. Output is byte-identical across runs.
+    Pack {
+        path: PathBuf,
+        /// Output archive path. Defaults to `<dirname>.rig` in CWD.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -153,7 +163,33 @@ fn main() -> Result<()> {
         Command::Status { scope } => status(scope.into()),
         Command::List { scope } => list(scope.into()),
         Command::Uninstall { target, scope } => uninstall(&target, scope.into()),
+        Command::Pack { path, out } => pack(&path, out.as_deref()),
     }
+}
+
+fn pack(path: &std::path::Path, out: Option<&std::path::Path>) -> Result<()> {
+    if !path.is_dir() {
+        bail!("`{}` is not a directory", path.display());
+    }
+    let default_out;
+    let out = match out {
+        Some(p) => p,
+        None => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "unit".into());
+            default_out = PathBuf::from(format!("{name}.rig"));
+            &default_out
+        }
+    };
+    rig_fs::pack_dir(path, out).with_context(|| format!("packing `{}`", path.display()))?;
+    let bytes = std::fs::read(out).with_context(|| format!("reading `{}`", out.display()))?;
+    let sha = rig_core::source::Sha256::of(&bytes);
+    println!("packed {} → {}", path.display(), out.display());
+    println!("  size:   {} bytes", bytes.len());
+    println!("  sha256: {sha}");
+    Ok(())
 }
 
 fn init(scope: CoreScope) -> Result<()> {

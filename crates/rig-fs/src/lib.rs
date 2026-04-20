@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 
 use rig_core::source::Sha256;
 
+pub mod pack;
+pub use pack::{pack_dir, unpack_to_temp};
+
 #[derive(Debug, thiserror::Error)]
 pub enum FsError {
     #[error("io error at {path}: {source}")]
@@ -24,6 +27,8 @@ pub enum FsError {
     NoHome,
     #[error("path expansion failed for `{0}`")]
     Expand(String),
+    #[error("pack/unpack error: {0}")]
+    Pack(String),
 }
 
 pub type FsResult<T> = Result<T, FsError>;

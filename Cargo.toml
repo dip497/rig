@@ -52,6 +52,9 @@ crossterm = "0.28"
 shellexpand = "3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tar = "0.4"
+flate2 = "1"
+tempfile = "3"
 
 # Internal crate dependencies
 rig-core = { path = "crates/rig-core", version = "0.2.0-dev" }
