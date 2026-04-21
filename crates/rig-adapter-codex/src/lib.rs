@@ -3,22 +3,24 @@
 //! Translates canonical units into `~/.codex/` (global) or
 //! `./.codex/` (project) layouts.
 //!
-//! Supported unit types (M1 wedge):
-//! - `Skill`  → `<scope>/skills/<name>/SKILL.md` (+ resources)
-//! - `Rule`   → `<scope>/rules/<name>.md`
+//! Supported unit types:
+//! - `Skill`    → `<scope>/skills/<name>/SKILL.md` (+ resources)
+//! - `Rule`     → `<scope>/rules/<name>.md`
+//! - `Command`  → `<scope>/commands/<name>.md`
+//! - `Subagent` → `<scope>/agents/<name>.md`
 //!
 //! Unsupported unit types (M1):
-//! - `Mcp`      — deferred to M2 (mutates `~/.codex/config.toml`)
-//! - `Hook`     — deferred to M2 (narrower event set than Claude)
-//! - `Command`  — deferred to M2 (`~/.codex/prompts/*.md`)
-//! - `Subagent` — deferred to M2 (downgrade with delegation-prompt warning)
-//! - `Plugin`   — deferred to M2 (explode into constituent units)
+//! - `Mcp`    — deferred (mutates `~/.codex/config.toml`)
+//! - `Hook`   — deferred (narrower event set than Claude)
+//! - `Plugin` — deferred (explode into constituent units)
 
 #![forbid(unsafe_code)]
 
+mod command;
 mod frontmatter;
 mod rule;
 mod skill;
+mod subagent;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -31,8 +33,10 @@ use rig_core::scope::Scope;
 use rig_core::source::Sha256;
 use rig_core::unit::{Unit, UnitType};
 
+pub use command::CommandConverter;
 pub use rule::RuleConverter;
 pub use skill::SkillConverter;
+pub use subagent::SubagentConverter;
 
 pub const AGENT_ID: &str = "codex";
 
@@ -41,6 +45,8 @@ fn subdir(unit_type: UnitType) -> AdapterResult<&'static str> {
     Ok(match unit_type {
         UnitType::Skill => "skills",
         UnitType::Rule => "rules",
+        UnitType::Command => "commands",
+        UnitType::Subagent => "agents",
         other => return Err(AdapterError::Unsupported(other)),
     })
 }
@@ -90,7 +96,14 @@ impl Adapter for CodexAdapter {
     }
 
     fn capabilities(&self) -> BTreeSet<UnitType> {
-        [UnitType::Skill, UnitType::Rule].into_iter().collect()
+        [
+            UnitType::Skill,
+            UnitType::Rule,
+            UnitType::Command,
+            UnitType::Subagent,
+        ]
+        .into_iter()
+        .collect()
     }
 
     fn install(&self, unit: &Unit, scope: Scope) -> AdapterResult<Receipt> {
@@ -161,7 +174,12 @@ impl Adapter for CodexAdapter {
 
     fn list(&self, scope: Scope) -> AdapterResult<Vec<InstalledUnit>> {
         let mut out = Vec::new();
-        for ty in [UnitType::Skill, UnitType::Rule] {
+        for ty in [
+            UnitType::Skill,
+            UnitType::Rule,
+            UnitType::Command,
+            UnitType::Subagent,
+        ] {
             let root = type_root(scope, ty)?;
             if !root.exists() {
                 continue;
@@ -316,6 +334,16 @@ fn to_native(unit: &Unit) -> AdapterResult<(UnitType, String, NativeLayout)> {
             SkillConverter.to_native(u)?,
         )),
         Unit::Rule(u) => Ok((UnitType::Rule, u.name.clone(), RuleConverter.to_native(u)?)),
+        Unit::Command(u) => Ok((
+            UnitType::Command,
+            u.name.clone(),
+            CommandConverter.to_native(u)?,
+        )),
+        Unit::Subagent(u) => Ok((
+            UnitType::Subagent,
+            u.name.clone(),
+            SubagentConverter.to_native(u)?,
+        )),
         _ => Err(AdapterError::Unsupported(unit.unit_type())),
     }
 }
@@ -324,6 +352,8 @@ fn from_native(unit_type: UnitType, native: &NativeLayout) -> AdapterResult<Unit
     Ok(match unit_type {
         UnitType::Skill => Unit::Skill(SkillConverter.parse_native(native)?),
         UnitType::Rule => Unit::Rule(RuleConverter.parse_native(native)?),
+        UnitType::Command => Unit::Command(CommandConverter.parse_native(native)?),
+        UnitType::Subagent => Unit::Subagent(SubagentConverter.parse_native(native)?),
         other => return Err(AdapterError::Unsupported(other)),
     })
 }
@@ -500,6 +530,45 @@ mod tests {
                 .unwrap();
             let listed = a.list(Scope::Global).unwrap();
             assert_eq!(listed.len(), 2);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn command_roundtrip() {
+        let tmp = tempdir("cmd");
+        with_home(&tmp, || {
+            let adapter = CodexAdapter::new();
+            let unit = Unit::Command(rig_core::unit::Command {
+                name: "review".into(),
+                description: Some("review changes".into()),
+                body: "review the diff.\n".into(),
+                tools: vec!["Read".into(), "Grep".into()],
+            });
+            let r = adapter.install(&unit, Scope::Global).unwrap();
+            assert!(r.paths[0].ends_with("commands/review.md"));
+            let back = adapter.read_local(&r.unit_ref, Scope::Global).unwrap();
+            assert_eq!(back, unit);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn subagent_roundtrip() {
+        let tmp = tempdir("sub");
+        with_home(&tmp, || {
+            let adapter = CodexAdapter::new();
+            let unit = Unit::Subagent(rig_core::unit::Subagent {
+                name: "sec".into(),
+                description: "sec review".into(),
+                tools: vec!["Read".into()],
+                model: Some("opus".into()),
+                body: "do the thing\n".into(),
+            });
+            let r = adapter.install(&unit, Scope::Global).unwrap();
+            assert!(r.paths[0].ends_with("agents/sec.md"));
+            let back = adapter.read_local(&r.unit_ref, Scope::Global).unwrap();
+            assert_eq!(back, unit);
         });
         std::fs::remove_dir_all(&tmp).ok();
     }

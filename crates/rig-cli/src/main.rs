@@ -537,6 +537,8 @@ fn native_for(adapter: &dyn Adapter, unit: &Unit) -> Result<NativeLayout> {
         ("claude", Unit::Subagent(u)) => SubagentConverter.to_native(u)?,
         ("codex", Unit::Skill(u)) => rig_adapter_codex::SkillConverter.to_native(u)?,
         ("codex", Unit::Rule(u)) => rig_adapter_codex::RuleConverter.to_native(u)?,
+        ("codex", Unit::Command(u)) => rig_adapter_codex::CommandConverter.to_native(u)?,
+        ("codex", Unit::Subagent(u)) => rig_adapter_codex::SubagentConverter.to_native(u)?,
         _ => bail!("unsupported (agent, unit) combination for native diffing"),
     };
     Ok(native)

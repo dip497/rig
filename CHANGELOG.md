@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Codex adapter now supports Command + Subagent.** Full parity with
+  the Claude Code adapter for the four unit types the CLI exposes
+  (skill, rule, command, subagent). Command → `~/.codex/commands/<name>.md`,
+  Subagent → `~/.codex/agents/<name>.md`; same frontmatter schema as
+  Claude. `rig install … --agent claude,codex` now writes command /
+  subagent units into both agents.
 - **GitHub source:** `rig install github:owner/repo@ref#path --agent claude`
   now works. Shells out to `git ls-remote` to resolve the ref to a SHA and
   `git init / remote add / fetch --depth=1 / checkout` into
