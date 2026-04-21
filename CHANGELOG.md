@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **CLI v0.3 gap-close (vs asm):** new commands `link` (symlink dev
+  install), `init-skill` (scaffold SKILL.md), `search` (substring over
+  installed), `stats` (per-agent/scope counts + disk usage), `doctor`
+  (duplicate + broken-symlink audit). `list` and `status` gain
+  `--json` for scripting.
 - **Rig GUI — install + uninstall from UI.** Header "+ Install" button
   opens a modal (source + type + agents + scope); detail pane gains an
   "Uninstall" button with confirm dialog. Two new Tauri commands
