@@ -34,6 +34,9 @@ pub enum Source {
     Marketplace {
         id: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 impl Source {
@@ -54,6 +57,11 @@ impl Source {
         if s.starts_with("./") || s.starts_with("../") || s.starts_with('/') || s.starts_with("~/")
         {
             return Ok(Self::Local { path: s.to_owned() });
+        }
+
+        // HTTP(S) URLs → Http source.
+        if s.starts_with("http://") || s.starts_with("https://") {
+            return Ok(Self::Http { url: s.to_owned() });
         }
 
         let (scheme, rest) = s
@@ -136,6 +144,7 @@ impl fmt::Display for Source {
             }
             Self::Local { path } => write!(f, "local:{path}"),
             Self::Marketplace { id } => write!(f, "marketplace:{id}"),
+            Self::Http { url } => write!(f, "{url}"),
         }
     }
 }
@@ -276,6 +285,28 @@ mod tests {
     #[test]
     fn rejects_missing_scheme() {
         assert!(Source::parse("acme/foo").is_err());
+    }
+
+    #[test]
+    fn parses_http() {
+        assert_eq!(
+            Source::parse("https://example.com/my-skill.rig").unwrap(),
+            Source::Http {
+                url: "https://example.com/my-skill.rig".into()
+            }
+        );
+        assert_eq!(
+            Source::parse("http://localhost:8000/demo.md").unwrap(),
+            Source::Http {
+                url: "http://localhost:8000/demo.md".into()
+            }
+        );
+    }
+
+    #[test]
+    fn http_display_is_bare_url() {
+        let s = "https://example.com/x.rig";
+        assert_eq!(Source::parse(s).unwrap().to_string(), s);
     }
 
     #[test]

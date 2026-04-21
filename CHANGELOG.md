@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **HTTP source:** `rig install https://example.com/skill.rig --agent claude`
+  now works. `Source::Http { url }` is a new variant; `rig-source` fetches
+  via `ureq`, supports `.rig`/`.tar.gz`/`.tgz` archives and plain `.md`
+  files, and returns a `FetchError::Http(_)` for network failures.
 - **CLI v0.3 gap-close (vs asm):** new commands `link` (symlink dev
   install), `init-skill` (scaffold SKILL.md), `search` (substring over
   installed), `stats` (per-agent/scope counts + disk usage), `doctor`

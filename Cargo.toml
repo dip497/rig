@@ -55,6 +55,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tar = "0.4"
 flate2 = "1"
 tempfile = "3"
+ureq = { version = "2", features = ["tls"] }
+mockito = "1"
+similar = "2"
 
 # Internal crate dependencies
 rig-core = { path = "crates/rig-core", version = "0.2.0-dev" }
