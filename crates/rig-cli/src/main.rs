@@ -14,7 +14,7 @@ use rig_adapter_claude::{
 };
 use rig_adapter_codex::CodexAdapter;
 use rig_core::adapter::{Adapter, InstalledUnit, Receipt, UnitRef};
-use rig_core::converter::Converter;
+use rig_core::converter::{Converter, NativeLayout};
 use rig_core::drift::DriftState;
 use rig_core::lockfile::{LockEntry, Lockfile};
 use rig_core::manifest::Bundle;
@@ -55,11 +55,18 @@ enum Command {
         /// Skip adding the source to `rig.toml`. Useful for one-off installs.
         #[arg(long)]
         no_manifest: bool,
+        /// How to handle local drift when re-installing over an
+        /// existing unit. Defaults to `keep` (never silently overwrite).
+        #[arg(long = "on-drift", value_enum, default_value_t = OnDrift::Keep)]
+        on_drift: OnDrift,
     },
     /// Install everything declared in `rig.toml`, writing the lockfile.
     Sync {
         #[arg(long, value_enum, default_value_t = CliScope::Project)]
         scope: CliScope,
+        /// Drift resolution mode (see `install --on-drift`).
+        #[arg(long = "on-drift", value_enum, default_value_t = OnDrift::Keep)]
+        on_drift: OnDrift,
     },
     /// Report drift between `rig.lock` and disk.
     Status {
@@ -185,6 +192,21 @@ impl CliAgent {
     }
 }
 
+/// Resolution strategy when re-installing over a locally-drifted unit.
+#[derive(Copy, Clone, ValueEnum, Debug)]
+enum OnDrift {
+    /// Leave the local version alone; skip the write.
+    Keep,
+    /// Overwrite without asking.
+    Overwrite,
+    /// Show a unified diff and prompt for confirmation.
+    DiffPerFile,
+    /// Rename the local files to `<path>.rig-backup-<ts>` before writing.
+    SnapshotThenOverwrite,
+    /// Abort the entire run.
+    Cancel,
+}
+
 #[derive(Copy, Clone, ValueEnum)]
 enum CliUnitType {
     Skill,
@@ -221,14 +243,16 @@ fn main() -> Result<()> {
             as_type,
             agent,
             no_manifest,
+            on_drift,
         } => install(
             &source,
             scope.into(),
             as_type.map(Into::into),
             &agent,
             !no_manifest,
+            on_drift,
         ),
-        Command::Sync { scope } => sync(scope.into()),
+        Command::Sync { scope, on_drift } => sync(scope.into(), on_drift),
         Command::Status { scope, json } => status(scope.into(), json),
         Command::List { scope, json } => list(scope.into(), json),
         Command::Uninstall { target, scope } => uninstall(&target, scope.into()),
@@ -289,6 +313,7 @@ fn install(
     as_type: Option<UnitType>,
     agents: &[CliAgent],
     persist: bool,
+    on_drift: OnDrift,
 ) -> Result<()> {
     let source =
         Source::parse(source_ref).with_context(|| format!("parsing source `{source_ref}`"))?;
@@ -305,9 +330,25 @@ fn install(
             );
             continue;
         }
-        let receipt = adapter
-            .install(&unit, scope)
-            .with_context(|| format!("installing into {} ({scope})", adapter.agent()))?;
+
+        let name = canonical_name(&unit);
+        let unit_ref = UnitRef::new(unit.unit_type(), name.clone());
+
+        // Look up a prior install_sha from the lockfile, if any.
+        let prior_install_sha = prior_install_sha(scope, unit.unit_type(), &source, ag.id());
+
+        let Some(receipt) = apply_with_drift_resolution(
+            &*adapter,
+            &unit,
+            &unit_ref,
+            scope,
+            prior_install_sha,
+            on_drift,
+        )?
+        else {
+            continue;
+        };
+
         println!(
             "installed {}/{} into {} ({scope})",
             type_slug(receipt.unit_ref.unit_type),
@@ -329,6 +370,276 @@ fn install(
         println!("  rig.toml + rig.lock updated");
     }
     Ok(())
+}
+
+/// Return the canonical unit name (the one the adapter uses as path stem).
+fn canonical_name(unit: &Unit) -> String {
+    match unit {
+        Unit::Skill(u) => u.name.clone(),
+        Unit::Rule(u) => u.name.clone(),
+        Unit::Command(u) => u.name.clone(),
+        Unit::Subagent(u) => u.name.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Find an earlier `install_sha` in the scope lockfile for this
+/// `(unit_type, source, agent)` tuple, if any.
+fn prior_install_sha(
+    scope: CoreScope,
+    unit_type: UnitType,
+    source: &Source,
+    agent_id: &str,
+) -> Option<rig_core::source::Sha256> {
+    let lock = store::load_lockfile(scope).ok()?;
+    let id = lock_id(unit_type, source);
+    lock.entries
+        .into_iter()
+        .find(|e| e.id == id && e.agent.as_str() == agent_id && e.scope == scope)
+        .map(|e| e.install_sha)
+}
+
+/// Detect drift against the current install and apply the chosen
+/// resolution mode. Returns `Ok(Some(receipt))` on success,
+/// `Ok(None)` when the write was skipped, or an error.
+fn apply_with_drift_resolution(
+    adapter: &dyn Adapter,
+    unit: &Unit,
+    unit_ref: &UnitRef,
+    scope: CoreScope,
+    prior_install_sha: Option<rig_core::source::Sha256>,
+    on_drift: OnDrift,
+) -> Result<Option<Receipt>> {
+    let incoming_native = native_for(adapter, unit)?;
+
+    // Compute current on-disk layout, if any.
+    let current_native = match adapter.read_local(unit_ref, scope) {
+        Ok(local) => Some(native_for(adapter, &local)?),
+        Err(_) => None,
+    };
+
+    // Clean shortcut: if prior install_sha == current on-disk hash AND
+    // the incoming bytes equal the on-disk bytes, there's no write to do.
+    if let (Some(cur), Some(prior)) = (&current_native, &prior_install_sha) {
+        let cur_sha = hash_layout(cur);
+        if cur_sha == *prior && hash_layout(&incoming_native) == cur_sha {
+            println!(
+                "  · {}/{} [{}] already up to date",
+                type_slug(unit_ref.unit_type),
+                unit_ref.name,
+                adapter.agent(),
+            );
+            // No write; return a synthetic receipt reflecting the current state.
+            return Ok(Some(Receipt {
+                unit_ref: unit_ref.clone(),
+                agent: adapter.agent(),
+                scope,
+                paths: Vec::new(),
+                install_sha: cur_sha,
+            }));
+        }
+    }
+
+    // Detect drift relative to the prior install_sha (if known).
+    let drift_state = match &prior_install_sha {
+        Some(sha) => adapter
+            .detect_drift(unit_ref, scope, sha.clone(), None)
+            .map(|(s, _)| s)
+            .unwrap_or(DriftState::Missing),
+        None => {
+            // No lockfile entry. If a file already exists, treat as LocalDrift.
+            if current_native.is_some() {
+                DriftState::LocalDrift
+            } else {
+                DriftState::Missing
+            }
+        }
+    };
+
+    // Clean / Missing: safe to write directly.
+    if matches!(drift_state, DriftState::Clean | DriftState::Missing) {
+        let r = adapter.install(unit, scope)?;
+        return Ok(Some(r));
+    }
+
+    // Otherwise: local (or both) drift. Honour on_drift.
+    match on_drift {
+        OnDrift::Keep => {
+            println!(
+                "  skipped (local-drift) {}/{} [{}]",
+                type_slug(unit_ref.unit_type),
+                unit_ref.name,
+                adapter.agent(),
+            );
+            Ok(None)
+        }
+        OnDrift::Overwrite => {
+            let r = adapter.install(unit, scope)?;
+            println!(
+                "  overwrote (had local-drift) {}/{} [{}]",
+                type_slug(r.unit_ref.unit_type),
+                r.unit_ref.name,
+                adapter.agent(),
+            );
+            Ok(Some(r))
+        }
+        OnDrift::SnapshotThenOverwrite => {
+            snapshot_current(current_native.as_ref(), adapter, unit_ref, scope)?;
+            let r = adapter.install(unit, scope)?;
+            println!(
+                "  snapshotted + overwrote {}/{} [{}]",
+                type_slug(r.unit_ref.unit_type),
+                r.unit_ref.name,
+                adapter.agent(),
+            );
+            Ok(Some(r))
+        }
+        OnDrift::Cancel => {
+            bail!(
+                "drift on {}/{} [{}] and --on-drift=cancel; aborting",
+                type_slug(unit_ref.unit_type),
+                unit_ref.name,
+                adapter.agent(),
+            );
+        }
+        OnDrift::DiffPerFile => {
+            let current = current_native.as_ref();
+            let proceed = diff_and_prompt(current, &incoming_native);
+            if !proceed {
+                println!(
+                    "  skipped (diff) {}/{} [{}]",
+                    type_slug(unit_ref.unit_type),
+                    unit_ref.name,
+                    adapter.agent(),
+                );
+                return Ok(None);
+            }
+            let r = adapter.install(unit, scope)?;
+            Ok(Some(r))
+        }
+    }
+}
+
+/// Run the adapter's `to_native` path via installing into a throwaway
+/// directory is overkill — use the local converter directly.
+fn native_for(adapter: &dyn Adapter, unit: &Unit) -> Result<NativeLayout> {
+    // Each adapter exposes `read_local` that returns a Unit, and
+    // `install` that writes native bytes. We don't have `to_native` on
+    // the Adapter trait publicly; re-derive via the Converter impls
+    // keyed by unit type. Fall back to the specific Converter exports.
+    // NOTE: both adapters share the same converters semantically for
+    // the unit types supported by the CLI.
+    let agent = adapter.agent();
+    let native = match (agent.as_str(), unit) {
+        ("claude", Unit::Skill(u)) => SkillConverter.to_native(u)?,
+        ("claude", Unit::Rule(u)) => RuleConverter.to_native(u)?,
+        ("claude", Unit::Command(u)) => CommandConverter.to_native(u)?,
+        ("claude", Unit::Subagent(u)) => SubagentConverter.to_native(u)?,
+        ("codex", Unit::Skill(u)) => rig_adapter_codex::SkillConverter.to_native(u)?,
+        ("codex", Unit::Rule(u)) => rig_adapter_codex::RuleConverter.to_native(u)?,
+        _ => bail!("unsupported (agent, unit) combination for native diffing"),
+    };
+    Ok(native)
+}
+
+fn hash_layout(l: &NativeLayout) -> rig_core::source::Sha256 {
+    let mut bytes = Vec::new();
+    for f in &l.files {
+        bytes.extend_from_slice(f.relative_path.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&f.bytes);
+        bytes.push(0);
+    }
+    rig_core::source::Sha256::of(&bytes)
+}
+
+/// For each file the incoming layout would write, rename the current
+/// on-disk file (if any) to `<path>.rig-backup-<ts>`.
+fn snapshot_current(
+    _current: Option<&NativeLayout>,
+    adapter: &dyn Adapter,
+    unit_ref: &UnitRef,
+    scope: CoreScope,
+) -> Result<()> {
+    // Use the adapter's list (which does NOT parse content) to get the
+    // actual on-disk paths. This works even when the local bytes are
+    // unparseable (e.g. user broke the frontmatter).
+    let listed = adapter.list(scope).unwrap_or_default();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if let Some(iu) = listed
+        .iter()
+        .find(|u| u.unit_ref.unit_type == unit_ref.unit_type && u.unit_ref.name == unit_ref.name)
+    {
+        for p in &iu.paths {
+            if !p.exists() {
+                continue;
+            }
+            let mut backup = p.clone().into_os_string();
+            backup.push(format!(".rig-backup-{ts}"));
+            std::fs::rename(p, std::path::PathBuf::from(&backup))
+                .with_context(|| format!("snapshotting {}", p.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Print a unified diff per file and prompt Y/n. Returns true on
+/// confirm. Non-TTY stdin defaults to false (skip).
+fn diff_and_prompt(current: Option<&NativeLayout>, incoming: &NativeLayout) -> bool {
+    use similar::{ChangeTag, TextDiff};
+
+    let empty = NativeLayout { files: Vec::new() };
+    let current = current.unwrap_or(&empty);
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for f in &current.files {
+        names.insert(f.relative_path.clone());
+    }
+    for f in &incoming.files {
+        names.insert(f.relative_path.clone());
+    }
+    for name in &names {
+        let a = current
+            .files
+            .iter()
+            .find(|f| &f.relative_path == name)
+            .map(|f| String::from_utf8_lossy(&f.bytes).into_owned())
+            .unwrap_or_default();
+        let b = incoming
+            .files
+            .iter()
+            .find(|f| &f.relative_path == name)
+            .map(|f| String::from_utf8_lossy(&f.bytes).into_owned())
+            .unwrap_or_default();
+        if a == b {
+            continue;
+        }
+        println!("--- {} (current)", name);
+        println!("+++ {} (incoming)", name);
+        let diff = TextDiff::from_lines(&a, &b);
+        for change in diff.iter_all_changes() {
+            let sign = match change.tag() {
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+                ChangeTag::Equal => " ",
+            };
+            print!("{sign}{}", change);
+        }
+    }
+
+    // Prompt.
+    use std::io::Write as _;
+    print!("apply changes? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut buf = String::new();
+    match std::io::stdin().read_line(&mut buf) {
+        Ok(0) => false,
+        Ok(_) => matches!(buf.trim(), "y" | "Y" | "yes"),
+        Err(_) => false,
+    }
 }
 
 fn fetch_unit(
@@ -441,7 +752,7 @@ fn lock_id(t: UnitType, source: &Source) -> String {
     format!("{}/{}", type_slug(t), source)
 }
 
-fn sync(scope: CoreScope) -> Result<()> {
+fn sync(scope: CoreScope, on_drift: OnDrift) -> Result<()> {
     let manifest = store::load_manifest(scope)?;
     if manifest.bundles.is_empty() {
         println!(
@@ -453,6 +764,7 @@ fn sync(scope: CoreScope) -> Result<()> {
 
     let mut new_lock = Lockfile::new();
     let mut installed = 0;
+    let mut skipped = 0;
 
     // Targets: honour `[agents].targets` if set, else default to claude.
     let targets: Vec<CliAgent> = if manifest.agents.targets.is_empty() {
@@ -484,12 +796,26 @@ fn sync(scope: CoreScope) -> Result<()> {
                 if !adapter.capabilities().contains(&ty) {
                     continue;
                 }
-                let receipt = adapter.install(&unit, scope).with_context(|| {
+
+                let uname = canonical_name(&unit);
+                let unit_ref = UnitRef::new(ty, uname);
+                let prior = prior_install_sha(scope, ty, &source, ag.id());
+
+                let receipt = apply_with_drift_resolution(
+                    &*adapter, &unit, &unit_ref, scope, prior, on_drift,
+                )
+                .with_context(|| {
                     format!(
                         "bundle `{name}`: installing `{src}` into {}",
                         adapter.agent()
                     )
                 })?;
+
+                let Some(receipt) = receipt else {
+                    skipped += 1;
+                    continue;
+                };
+
                 println!(
                     "  ✓ {}/{}  ({src}) → {}",
                     type_slug(ty),
@@ -511,9 +837,29 @@ fn sync(scope: CoreScope) -> Result<()> {
         }
     }
 
+    // Preserve any prior lock entries for units we skipped (so they
+    // remain tracked). Merge: existing entries for (id, agent, scope)
+    // that we did NOT overwrite.
+    if let Ok(prev) = store::load_lockfile(scope) {
+        for e in prev.entries {
+            let already = new_lock
+                .entries
+                .iter()
+                .any(|n| n.id == e.id && n.agent == e.agent && n.scope == e.scope);
+            if !already {
+                new_lock.entries.push(e);
+            }
+        }
+    }
+
     store::save_lockfile(scope, &new_lock)?;
     println!(
-        "synced {installed} unit(s); lockfile at {}",
+        "synced {installed} unit(s){}; lockfile at {}",
+        if skipped > 0 {
+            format!(", {skipped} skipped (drift)")
+        } else {
+            String::new()
+        },
         store::lockfile_path(scope)?.display()
     );
     Ok(())
@@ -1183,5 +1529,157 @@ mod tests {
     fn scope_slug_roundtrip() {
         assert_eq!(scope_slug(CoreScope::Global), "global");
         assert_eq!(scope_slug(CoreScope::Project), "project");
+    }
+
+    use std::path::Path;
+    use std::sync::Mutex;
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn tempdir(tag: &str) -> PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        let p = std::env::temp_dir().join(format!(
+            "rig-cli-drift-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        let r = f();
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        r
+    }
+
+    fn sample_rule() -> Unit {
+        Unit::Rule(rig_core::unit::Rule {
+            name: "r".into(),
+            description: None,
+            body: "original\n".into(),
+            placement: Default::default(),
+        })
+    }
+
+    fn sample_rule_v2() -> Unit {
+        Unit::Rule(rig_core::unit::Rule {
+            name: "r".into(),
+            description: None,
+            body: "upstream-v2\n".into(),
+            placement: Default::default(),
+        })
+    }
+
+    #[test]
+    fn on_drift_keep_skips_write() {
+        let tmp = tempdir("keep");
+        with_home(&tmp, || {
+            let adapter = ClaudeAdapter::new();
+            let r = adapter.install(&sample_rule(), CoreScope::Global).unwrap();
+            // Tamper with local file.
+            std::fs::write(&r.paths[0], b"tampered\n").unwrap();
+            let unit_ref = UnitRef::new(UnitType::Rule, "r".to_owned());
+            let out = apply_with_drift_resolution(
+                &adapter,
+                &sample_rule_v2(),
+                &unit_ref,
+                CoreScope::Global,
+                Some(r.install_sha.clone()),
+                OnDrift::Keep,
+            )
+            .unwrap();
+            assert!(out.is_none());
+            // Local tamper preserved.
+            assert_eq!(std::fs::read(&r.paths[0]).unwrap(), b"tampered\n");
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn on_drift_overwrite_writes() {
+        let tmp = tempdir("over");
+        with_home(&tmp, || {
+            let adapter = ClaudeAdapter::new();
+            let r = adapter.install(&sample_rule(), CoreScope::Global).unwrap();
+            std::fs::write(&r.paths[0], b"tampered\n").unwrap();
+            let unit_ref = UnitRef::new(UnitType::Rule, "r".to_owned());
+            let out = apply_with_drift_resolution(
+                &adapter,
+                &sample_rule_v2(),
+                &unit_ref,
+                CoreScope::Global,
+                Some(r.install_sha),
+                OnDrift::Overwrite,
+            )
+            .unwrap();
+            assert!(out.is_some());
+            let on_disk = std::fs::read_to_string(&r.paths[0]).unwrap();
+            assert!(on_disk.contains("upstream-v2"));
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn on_drift_snapshot_then_overwrite() {
+        let tmp = tempdir("snap");
+        with_home(&tmp, || {
+            let adapter = ClaudeAdapter::new();
+            let r = adapter.install(&sample_rule(), CoreScope::Global).unwrap();
+            std::fs::write(&r.paths[0], b"tampered\n").unwrap();
+            let unit_ref = UnitRef::new(UnitType::Rule, "r".to_owned());
+            let _ = apply_with_drift_resolution(
+                &adapter,
+                &sample_rule_v2(),
+                &unit_ref,
+                CoreScope::Global,
+                Some(r.install_sha),
+                OnDrift::SnapshotThenOverwrite,
+            )
+            .unwrap();
+            // Incoming bytes on target path.
+            assert!(std::fs::read_to_string(&r.paths[0])
+                .unwrap()
+                .contains("upstream-v2"));
+            // A backup file exists next to the original.
+            let parent = r.paths[0].parent().unwrap();
+            let names: Vec<String> = std::fs::read_dir(parent)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            let has_backup = names.iter().any(|n| n.contains(".rig-backup-"));
+            assert!(has_backup, "no backup file found, dir has: {names:?}");
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn on_drift_cancel_aborts() {
+        let tmp = tempdir("cancel");
+        with_home(&tmp, || {
+            let adapter = ClaudeAdapter::new();
+            let r = adapter.install(&sample_rule(), CoreScope::Global).unwrap();
+            std::fs::write(&r.paths[0], b"tampered\n").unwrap();
+            let unit_ref = UnitRef::new(UnitType::Rule, "r".to_owned());
+            let res = apply_with_drift_resolution(
+                &adapter,
+                &sample_rule_v2(),
+                &unit_ref,
+                CoreScope::Global,
+                Some(r.install_sha),
+                OnDrift::Cancel,
+            );
+            assert!(res.is_err());
+        });
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

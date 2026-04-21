@@ -70,6 +70,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- **`rig sync` and `rig install` detect drift; never silently overwrite.**
+  New `--on-drift` flag on both commands selects the resolution mode:
+  `keep` (default — safest), `overwrite`, `diff-per-file` (unified diff
+  + Y/n prompt), `snapshot-then-overwrite` (rename current to
+  `<path>.rig-backup-<ts>`), or `cancel` (abort the run). Prior
+  behaviour was a silent clobber.
 - Project scope pivoted from "Claude-only TUI" to "cross-agent
   distribution and management layer" (M1 targets Claude Code and Codex).
 - Pre-pivot codebase archived to `crates/rig-legacy/` as reference only;
