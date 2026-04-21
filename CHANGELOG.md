@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **`rig link` entries are tracked in `links.toml`.** `list`, `search`,
+  `stats`, and `doctor` now surface linked skills (plain-text output
+  marks them `(linked)`; JSON adds a `"linked": true` field). New
+  `rig unlink <type>/<name> [--agent …] [--scope …]` command removes
+  both the symlink and the links.toml entry. `doctor` flags broken
+  link source paths and dangling symlinks.
 - **Codex adapter now supports Command + Subagent.** Full parity with
   the Claude Code adapter for the four unit types the CLI exposes
   (skill, rule, command, subagent). Command → `~/.codex/commands/<name>.md`,

@@ -133,6 +133,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Remove a `rig link` symlink and drop its entry from links.toml.
+    Unlink {
+        target: String,
+        /// Target agent(s). If omitted, removes across all agents.
+        #[arg(long, value_delimiter = ',')]
+        agent: Option<Vec<CliAgent>>,
+        #[arg(long, value_enum, default_value_t = CliScope::Project)]
+        scope: CliScope,
+    },
     /// Audit: duplicates across agents, broken symlinks.
     Doctor,
 }
@@ -266,6 +275,11 @@ fn main() -> Result<()> {
         Command::InitSkill { name, in_dir } => init_skill(&name, in_dir.as_deref()),
         Command::Search { query, scope, json } => search(&query, scope, json),
         Command::Stats { scope, json } => stats(scope, json),
+        Command::Unlink {
+            target,
+            agent,
+            scope,
+        } => unlink(&target, agent.as_deref(), scope.into()),
         Command::Doctor => doctor(),
     }
 }
@@ -1006,10 +1020,12 @@ struct ListEntry<'a> {
     name: String,
     scope: &'static str,
     paths: Vec<String>,
+    linked: bool,
 }
 
 fn list(scope: CoreScope, json: bool) -> Result<()> {
     let all = collect_all(&[scope])?;
+    let link_keys = link_key_set(&[scope]);
     if json {
         let rows: Vec<ListEntry<'_>> = all
             .iter()
@@ -1019,6 +1035,12 @@ fn list(scope: CoreScope, json: bool) -> Result<()> {
                 name: u.unit_ref.name.clone(),
                 scope: scope_slug(*sc),
                 paths: u.paths.iter().map(|p| p.display().to_string()).collect(),
+                linked: link_keys.contains(&(
+                    agent.as_str().to_owned(),
+                    u.unit_ref.unit_type,
+                    u.unit_ref.name.clone(),
+                    *sc,
+                )),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -1028,17 +1050,40 @@ fn list(scope: CoreScope, json: bool) -> Result<()> {
         println!("no units installed in any agent ({scope})");
         return Ok(());
     }
-    for (agent, _sc, u) in &all {
+    for (agent, sc, u) in &all {
+        let linked = link_keys.contains(&(
+            agent.as_str().to_owned(),
+            u.unit_ref.unit_type,
+            u.unit_ref.name.clone(),
+            *sc,
+        ));
         println!(
-            "{}/{} ({} file{}) [{}]",
+            "{}/{} ({} file{}) [{}]{}",
             type_slug(u.unit_ref.unit_type),
             u.unit_ref.name,
             u.paths.len(),
             if u.paths.len() == 1 { "" } else { "s" },
             agent,
+            if linked { " (linked)" } else { "" },
         );
     }
     Ok(())
+}
+
+/// Collect links.toml entries across the given scopes into a set of
+/// `(agent_id, unit_type, name, scope)` tuples for O(1) lookup.
+fn link_key_set(
+    scopes: &[CoreScope],
+) -> std::collections::HashSet<(String, UnitType, String, CoreScope)> {
+    let mut out = std::collections::HashSet::new();
+    for &sc in scopes {
+        if let Ok(links) = store::load_links(sc) {
+            for e in links.entries {
+                out.insert((e.agent, e.unit_type, e.name, sc));
+            }
+        }
+    }
+    out
 }
 
 fn uninstall(target: &str, scope: CoreScope) -> Result<()> {
@@ -1135,9 +1180,76 @@ fn link(path: &Path, scope: CoreScope, agents: &[CliAgent], force: bool) -> Resu
             std::os::unix::fs::symlink(&abs_src, &target)
                 .with_context(|| format!("symlink {} → {}", target.display(), abs_src.display()))?;
             println!("linked {} skill/{} → {}", ag.id(), name, abs_src.display());
+
+            upsert_link(
+                scope,
+                &store::LinkEntry {
+                    agent: ag.id().to_owned(),
+                    name: name.clone(),
+                    unit_type: UnitType::Skill,
+                    source: abs_src.clone(),
+                },
+            )?;
         }
         Ok(())
     }
+}
+
+fn upsert_link(scope: CoreScope, entry: &store::LinkEntry) -> Result<()> {
+    let mut links = store::load_links(scope)?;
+    links.entries.retain(|e| {
+        !(e.agent == entry.agent && e.name == entry.name && e.unit_type == entry.unit_type)
+    });
+    links.entries.push(entry.clone());
+    store::save_links(scope, &links)
+}
+
+fn unlink(target: &str, agents: Option<&[CliAgent]>, scope: CoreScope) -> Result<()> {
+    let (ty_slug, name) = target
+        .split_once('/')
+        .with_context(|| format!("target must be `<type>/<name>`, got `{target}`"))?;
+    let unit_type = parse_type(ty_slug)?;
+    let agents_to_remove: Vec<CliAgent> = match agents {
+        Some(list) if !list.is_empty() => list.to_vec(),
+        _ => vec![CliAgent::Claude, CliAgent::Codex],
+    };
+
+    let mut links = store::load_links(scope)?;
+    let mut any = false;
+
+    for &ag in &agents_to_remove {
+        // Remove the symlink itself (best-effort).
+        if unit_type == UnitType::Skill {
+            if let Ok(link_path) = link_target(ag, scope, name) {
+                if link_path.symlink_metadata().is_ok() {
+                    // symlink or dir
+                    let ft = link_path.symlink_metadata().unwrap().file_type();
+                    if ft.is_symlink() {
+                        std::fs::remove_file(&link_path)
+                            .with_context(|| format!("removing symlink {}", link_path.display()))?;
+                        println!("unlinked {} {}/{}", ag.id(), ty_slug, name);
+                        any = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let before = links.entries.len();
+    links.entries.retain(|e| {
+        !(e.name == name
+            && e.unit_type == unit_type
+            && agents_to_remove.iter().any(|a| a.id() == e.agent))
+    });
+    if links.entries.len() != before {
+        store::save_links(scope, &links)?;
+        any = true;
+    }
+
+    if !any {
+        println!("no link entry found for {target}");
+    }
+    Ok(())
 }
 
 fn link_target(ag: CliAgent, scope: CoreScope, name: &str) -> Result<PathBuf> {
@@ -1200,10 +1312,13 @@ struct SearchRow<'a> {
     name: String,
     scope: &'static str,
     paths: Vec<String>,
+    linked: bool,
 }
 
 fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
-    let all = collect_all(&scope.scopes())?;
+    let scopes = scope.scopes();
+    let all = collect_all(&scopes)?;
+    let link_keys = link_key_set(&scopes);
     let matches: Vec<_> = all
         .into_iter()
         .filter(|(_, _, u)| matches_query(query, u.unit_ref.unit_type, &u.unit_ref.name))
@@ -1218,6 +1333,12 @@ fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
                 name: u.unit_ref.name.clone(),
                 scope: scope_slug(*sc),
                 paths: u.paths.iter().map(|p| p.display().to_string()).collect(),
+                linked: link_keys.contains(&(
+                    agent.as_str().to_owned(),
+                    u.unit_ref.unit_type,
+                    u.unit_ref.name.clone(),
+                    *sc,
+                )),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -1234,13 +1355,20 @@ fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
             .first()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
+        let linked = link_keys.contains(&(
+            agent.as_str().to_owned(),
+            u.unit_ref.unit_type,
+            u.unit_ref.name.clone(),
+            *sc,
+        ));
         println!(
-            "{}/{}  [{}]  ({})  {}",
+            "{}/{}  [{}]  ({})  {}{}",
             type_slug(u.unit_ref.unit_type),
             u.unit_ref.name,
             agent,
             scope_slug(*sc),
-            path
+            path,
+            if linked { "  (linked)" } else { "" },
         );
     }
     Ok(())
@@ -1432,10 +1560,52 @@ fn doctor() -> Result<()> {
         }
     }
 
-    if dup_count == 0 && broken_count == 0 {
+    // Broken link entries: source path no longer exists, or the
+    // symlink itself is missing from disk.
+    let mut broken_link_count = 0;
+    for sc in [CoreScope::Global, CoreScope::Project] {
+        let Ok(links) = store::load_links(sc) else {
+            continue;
+        };
+        for e in &links.entries {
+            let ag = match e.agent.as_str() {
+                s if s == rig_adapter_claude::AGENT_ID => CliAgent::Claude,
+                s if s == rig_adapter_codex::AGENT_ID => CliAgent::Codex,
+                _ => continue,
+            };
+            if !e.source.exists() {
+                broken_link_count += 1;
+                println!(
+                    "broken link source: [{}] {}/{} → {} (source missing)",
+                    e.agent,
+                    type_slug(e.unit_type),
+                    e.name,
+                    e.source.display(),
+                );
+            }
+            if e.unit_type == UnitType::Skill {
+                if let Ok(lp) = link_target(ag, sc, &e.name) {
+                    if lp.symlink_metadata().is_err() {
+                        broken_link_count += 1;
+                        println!(
+                            "broken link: [{}] {}/{} missing at {}",
+                            e.agent,
+                            type_slug(e.unit_type),
+                            e.name,
+                            lp.display(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if dup_count == 0 && broken_count == 0 && broken_link_count == 0 {
         println!("all clean");
     } else {
-        println!("{dup_count} duplicates, {broken_count} broken symlinks");
+        println!(
+            "{dup_count} duplicates, {broken_count} broken symlinks, {broken_link_count} broken links"
+        );
     }
     Ok(())
 }
@@ -1443,10 +1613,15 @@ fn doctor() -> Result<()> {
 // ---------- Shared helpers ----------
 
 /// List every installed unit across both adapters and the given scopes.
+///
+/// Includes `rig link` entries from `links.toml` so they appear in
+/// `list` / `search` / `stats` even when the adapter's native
+/// `list()` misses them (e.g. symlinked dirs on platforms where
+/// `file_type()` reports `Symlink` rather than `Dir`).
 fn collect_all(
     scopes: &[CoreScope],
 ) -> Result<Vec<(rig_core::agent::AgentId, CoreScope, InstalledUnit)>> {
-    let mut out = Vec::new();
+    let mut out: Vec<(rig_core::agent::AgentId, CoreScope, InstalledUnit)> = Vec::new();
     for adapter in [
         Box::new(ClaudeAdapter::new()) as Box<dyn Adapter>,
         Box::new(CodexAdapter::new()),
@@ -1461,6 +1636,42 @@ fn collect_all(
             }
         }
     }
+
+    // Merge link entries not already in the native list.
+    for &sc in scopes {
+        let Ok(links) = store::load_links(sc) else {
+            continue;
+        };
+        for e in links.entries {
+            let ag = match e.agent.as_str() {
+                s if s == rig_adapter_claude::AGENT_ID => CliAgent::Claude,
+                s if s == rig_adapter_codex::AGENT_ID => CliAgent::Codex,
+                _ => continue,
+            };
+            let agent_id = rig_core::agent::AgentId::new(ag.id());
+            let already = out.iter().any(|(a, ss, u)| {
+                a == &agent_id
+                    && *ss == sc
+                    && u.unit_ref.unit_type == e.unit_type
+                    && u.unit_ref.name == e.name
+            });
+            if already {
+                continue;
+            }
+            let link_path = link_target(ag, sc, &e.name).ok();
+            let paths = link_path.into_iter().collect();
+            out.push((
+                agent_id,
+                sc,
+                InstalledUnit {
+                    unit_ref: UnitRef::new(e.unit_type, e.name),
+                    scope: sc,
+                    paths,
+                },
+            ));
+        }
+    }
+
     Ok(out)
 }
 
@@ -1660,6 +1871,72 @@ mod tests {
                 .collect();
             let has_backup = names.iter().any(|n| n.contains(".rig-backup-"));
             assert!(has_backup, "no backup file found, dir has: {names:?}");
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn links_roundtrip() {
+        let tmp = tempdir("links");
+        with_home(&tmp, || {
+            let scope = CoreScope::Global;
+            let entry = store::LinkEntry {
+                agent: "claude".into(),
+                name: "demo".into(),
+                unit_type: UnitType::Skill,
+                source: tmp.join("demo"),
+            };
+            store::save_links(
+                scope,
+                &store::Links {
+                    entries: vec![entry.clone()],
+                },
+            )
+            .unwrap();
+            let loaded = store::load_links(scope).unwrap();
+            assert_eq!(loaded.entries.len(), 1);
+            assert_eq!(loaded.entries[0].name, "demo");
+            assert_eq!(loaded.entries[0].unit_type, UnitType::Skill);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_list_unlink_integration() {
+        let tmp = tempdir("link-int");
+        with_home(&tmp, || {
+            // Create a source skill directory.
+            let src = tmp.join("my-demo");
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(
+                src.join("SKILL.md"),
+                "---\nname: my-demo\ndescription: d\n---\nbody\n",
+            )
+            .unwrap();
+
+            link(&src, CoreScope::Global, &[CliAgent::Claude], false).unwrap();
+
+            // links.toml should contain the entry.
+            let l = store::load_links(CoreScope::Global).unwrap();
+            assert_eq!(l.entries.len(), 1);
+            assert_eq!(l.entries[0].name, "my-demo");
+
+            // `collect_all` (the function that powers `list`) should
+            // surface the linked skill — either via the adapter's
+            // native list or via the links.toml merge path.
+            let all = collect_all(&[CoreScope::Global]).unwrap();
+            assert!(all.iter().any(|(_, _, u)| u.unit_ref.name == "my-demo"));
+
+            // Unlink removes the symlink and the entry.
+            unlink(
+                "skill/my-demo",
+                Some(&[CliAgent::Claude]),
+                CoreScope::Global,
+            )
+            .unwrap();
+            let l2 = store::load_links(CoreScope::Global).unwrap();
+            assert!(l2.entries.is_empty());
         });
         std::fs::remove_dir_all(&tmp).ok();
     }
