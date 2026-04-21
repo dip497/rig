@@ -1,0 +1,69 @@
+import type { DriftReportDto, InstalledUnitDto } from "../types";
+import DriftBadge from "./DriftBadge";
+
+export interface UnitRow extends InstalledUnitDto {
+  drift?: DriftReportDto | null;
+}
+
+export default function UnitTable({
+  rows,
+  onSelect,
+  selectedKey,
+}: {
+  rows: UnitRow[];
+  onSelect: (u: UnitRow) => void;
+  selectedKey: string | null;
+}) {
+  if (rows.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-slate-500">
+        <div className="text-center">
+          <div className="text-lg font-medium">No units found</div>
+          <div className="mt-1 text-sm">
+            Run <code className="rounded bg-slate-100 px-1">rig install</code> to
+            add units.
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="overflow-auto">
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase text-slate-500">
+          <tr>
+            <th className="px-3 py-2">Agent</th>
+            <th className="px-3 py-2">Type</th>
+            <th className="px-3 py-2">Name</th>
+            <th className="px-3 py-2">Drift</th>
+            <th className="px-3 py-2">Paths</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const k = `${r.agent}/${r.unitType}/${r.name}`;
+            return (
+              <tr
+                key={k}
+                onClick={() => onSelect(r)}
+                className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${
+                  selectedKey === k ? "bg-indigo-50" : ""
+                }`}
+              >
+                <td className="px-3 py-2 font-mono text-xs">{r.agent}</td>
+                <td className="px-3 py-2 font-mono text-xs">{r.unitType}</td>
+                <td className="px-3 py-2 font-medium">{r.name}</td>
+                <td className="px-3 py-2">
+                  <DriftBadge state={r.drift?.state ?? null} />
+                </td>
+                <td className="px-3 py-2 text-xs text-slate-500">
+                  {r.paths.length} file{r.paths.length === 1 ? "" : "s"}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}

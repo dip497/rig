@@ -294,5 +294,45 @@ install`-s on any contributor's machine.
 
 ---
 
+## ADR-017 · 2026-04-21 · GUI stack: Tauri 2 + React 19, direct-link to rig-core
+
+**Decision.** The Rig desktop GUI is a Tauri 2 shell hosting a React 19
++ TypeScript + Vite 8 + Tailwind 4 frontend. The Tauri Rust side links
+`rig-core`, `rig-adapter-claude`, and `rig-adapter-codex` directly
+in-process; there is no daemon and no `rig-api` JSON-RPC hop in M1.
+
+**Context.** Per ADR-008, GUI is one of the two M1 surfaces alongside
+the CLI. Per ADR-015, we direct-execute and backfill specs later.
+`jeremymcs/gsd2-config` is a shipped production reference using this
+exact stack — proven ergonomic for a native config manager. The M1
+scope is read-only (browse, drift-status, detail); mutating flows
+(install/uninstall/sync) stay in the CLI.
+
+**Alternatives.**
+
+- (A) Leptos + Tauri (all Rust). Rejected: WASM bundle + slower iter
+  than React for a UI-heavy surface. M2+ reconsideration only.
+- (B) Svelte 5 + Tauri. Rejected: smaller community + no in-house
+  reference that already ships.
+- (C) Vanilla JS. Rejected: painful past ~3 screens; drift viz needs
+  structured components.
+- (D) Go via `rig-api` RPC from day one. Rejected: daemon itself is
+  M2 (ADR-013); forcing the RPC contract now would slow the GUI
+  wedge without a second frontend to justify the seam.
+
+**Shape.** The frontend lives at `crates/rig-gui/`; the Tauri Rust
+crate lives at `crates/rig-gui/src-tauri/` (Tauri convention). M1
+commands: `list_agents`, `list_units`, `detect_drift`,
+`read_unit_body`, `read_manifest`, `read_lockfile`, `scope_roots`.
+Wire format uses `camelCase` (serde `rename_all`); TS types are
+hand-mirrored (no `ts-rs` yet — revisit in M1.5).
+
+**Revisit when.** (1) A second frontend surface lands (VS Code /
+mobile / plugin) — the RPC hop becomes load-bearing and we lift the
+commands into `rig-api`. (2) GUI adds mutating flows — drift
+resolution UI will need per-unit progress events.
+
+---
+
 *To append a new ADR, copy the heading format and add at the bottom.
 Do not rewrite or delete earlier entries.*

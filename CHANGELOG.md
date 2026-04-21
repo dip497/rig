@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **Rig GUI (M1 read-only dashboard):** Tauri 2 + React 19 + TypeScript
+  + Vite 8 + Tailwind 4. Agent × scope × unit matrix with drift status
+  visualisation; detail pane shows SHAs, paths, and body preview.
+  In-process direct-link to `rig-core` + both adapters (no daemon,
+  per ADR-015). Install / uninstall / drift-resolve remain CLI-only
+  in M1. See ADR-016.
 - **Tarball source** (`rig pack` + `.rig` install): `rig pack <dir>`
   produces a deterministic gzipped tar (sorted entries, zeroed
   mtime/uid/gid, gzip header mtime=0) — same input dir → byte-identical

@@ -11,7 +11,7 @@ members = [
     "crates/rig-api",
     "crates/rig-daemon",
     "crates/rig-cli",
-    "crates/rig-gui",
+    "crates/rig-gui/src-tauri",
 ]
 default-members = [
     "crates/rig-core",
@@ -24,7 +24,7 @@ default-members = [
     "crates/rig-api",
     "crates/rig-daemon",
     "crates/rig-cli",
-    "crates/rig-gui",
+    "crates/rig-gui/src-tauri",
 ]
 exclude = ["crates/rig-legacy"]
 
@@ -65,6 +65,10 @@ rig-plugin-host = { path = "crates/rig-plugin-host", version = "0.2.0-dev" }
 rig-adapter-claude = { path = "crates/rig-adapter-claude", version = "0.2.0-dev" }
 rig-adapter-codex = { path = "crates/rig-adapter-codex", version = "0.2.0-dev" }
 rig-api = { path = "crates/rig-api", version = "0.2.0-dev" }
+
+# Tauri (GUI)
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
 
 [profile.release]
 opt-level = 3

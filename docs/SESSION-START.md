@@ -29,6 +29,15 @@ As of `e89b4fc` on `refactor/cross-agent-pivot` (pushed to origin).
   - MCP / Hook / Plugin: stubbed, return `Unsupported`
 - **Sources:** local only. github / git / npm / marketplace still
   return `Unsupported`. **Next wedge = github.**
+- **GUI M1 shipped (read-only).** `crates/rig-gui/` is a Tauri 2 +
+  React 19 + Vite 8 + Tailwind 4 dashboard. Agent × scope × unit
+  matrix with drift badges; detail pane shows SHAs + body preview.
+  Seven Tauri commands (`list_agents` / `list_units` / `detect_drift`
+  / `read_unit_body` / `read_manifest` / `read_lockfile` /
+  `scope_roots`). Direct-links `rig-core` + both adapters — no
+  daemon, no `rig-api` RPC yet (ADR-017). Install / uninstall /
+  drift-resolve still CLI-only. `npm run build` + `cargo check` +
+  64 tests all pass; `npm run tauri dev` untested (needs display).
 - **Dogfood in place.** `.claude/agents/` has 5 subagents,
   `.claude/skills/` has 4 Rig-specific dev skills,
   `.claude/settings.json` wires 5 hooks. Hooks firing reliably;
