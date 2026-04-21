@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **GitHub source:** `rig install github:owner/repo@ref#path --agent claude`
+  now works. Shells out to `git ls-remote` to resolve the ref to a SHA and
+  `git init / remote add / fetch --depth=1 / checkout` into
+  `~/.rig/cache/github/<owner>/<repo>@<sha>/`. Optional `#subpath`
+  selects a skill directory inside the repo. No heavy `git2`/`gix`
+  dependency — system `git` CLI only.
 - **HTTP source:** `rig install https://example.com/skill.rig --agent claude`
   now works. `Source::Http { url }` is a new variant; `rig-source` fetches
   via `ureq`, supports `.rig`/`.tar.gz`/`.tgz` archives and plain `.md`

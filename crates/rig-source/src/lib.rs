@@ -38,6 +38,8 @@ pub enum FetchError {
     },
     #[error("http error: {0}")]
     Http(String),
+    #[error("git error: {0}")]
+    Git(String),
 }
 
 pub type FetchResult<T> = Result<T, FetchError>;
@@ -65,11 +67,141 @@ pub fn fetch(source: &Source) -> FetchResult<Fetched> {
     match source {
         Source::Local { path } => fetch_local(source, Path::new(path)),
         Source::Http { url } => fetch_http(source, url),
-        Source::Github { .. }
-        | Source::Git { .. }
-        | Source::Npm { .. }
-        | Source::Marketplace { .. } => Err(FetchError::Unsupported(source.to_string())),
+        Source::Github {
+            repo,
+            git_ref,
+            path,
+        } => fetch_github(source, repo, git_ref.as_deref(), path.as_deref()),
+        Source::Git { .. } | Source::Npm { .. } | Source::Marketplace { .. } => {
+            Err(FetchError::Unsupported(source.to_string()))
+        }
     }
+}
+
+/// Build the cache directory path for a resolved github repo at SHA.
+pub fn github_cache_dir(owner: &str, repo: &str, sha: &str) -> FetchResult<PathBuf> {
+    let home = rig_fs::home_dir().map_err(|e| FetchError::Git(e.to_string()))?;
+    Ok(home
+        .join(".rig")
+        .join("cache")
+        .join("github")
+        .join(owner)
+        .join(format!("{repo}@{sha}")))
+}
+
+/// Build the HTTPS clone URL for a `owner/repo` string.
+#[must_use]
+pub fn github_clone_url(repo: &str) -> String {
+    format!("https://github.com/{repo}.git")
+}
+
+fn fetch_github(
+    source: &Source,
+    repo: &str,
+    git_ref: Option<&str>,
+    subpath: Option<&str>,
+) -> FetchResult<Fetched> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| FetchError::Git(format!("bad repo `{repo}` (expected owner/name)")))?;
+    let url = github_clone_url(repo);
+    let ref_spec = git_ref.unwrap_or("HEAD");
+
+    // Resolve ref → SHA via `git ls-remote`.
+    let sha = resolve_ref(&url, ref_spec)?;
+    let cache = github_cache_dir(owner, name, &sha)?;
+
+    // If the SHA isn't cached yet, shallow-clone into it.
+    if !cache.join(".git").exists() {
+        if let Some(parent) = cache.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| FetchError::Io {
+                path: parent.to_path_buf(),
+                source: e,
+            })?;
+        }
+        std::fs::create_dir_all(&cache).map_err(|e| FetchError::Io {
+            path: cache.clone(),
+            source: e,
+        })?;
+        run_git(&cache, &["init", "-q"])?;
+        run_git(&cache, &["remote", "add", "origin", &url])?;
+        run_git(&cache, &["fetch", "--depth=1", "-q", "origin", &sha])?;
+        run_git(&cache, &["checkout", "-q", &sha])?;
+    }
+
+    let root = match subpath {
+        Some(p) => cache.join(p),
+        None => cache.clone(),
+    };
+    if !root.exists() {
+        return Err(FetchError::Git(format!(
+            "path `{}` not found in {repo}@{sha}",
+            root.display()
+        )));
+    }
+
+    let (walk_root, detected) = detect(&root)?;
+    let files = if root.is_file() {
+        vec![root.clone()]
+    } else {
+        collect(&walk_root).map_err(|e| FetchError::Io {
+            path: walk_root.clone(),
+            source: e,
+        })?
+    };
+    let (native, hash_input) = read_files(&files, &walk_root, root.is_file())?;
+
+    Ok(Fetched {
+        source: source.clone(),
+        source_sha: Sha256::of(&hash_input),
+        native: NativeLayout { files: native },
+        detected,
+    })
+}
+
+fn resolve_ref(url: &str, ref_spec: &str) -> FetchResult<String> {
+    let output = std::process::Command::new("git")
+        .args(["ls-remote", url, ref_spec])
+        .output()
+        .map_err(|e| FetchError::Git(format!("invoking git: {e}")))?;
+    if !output.status.success() {
+        return Err(FetchError::Git(format!(
+            "git ls-remote {url} {ref_spec}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // First line, first column.
+    let line = text
+        .lines()
+        .next()
+        .ok_or_else(|| FetchError::Git(format!("ref `{ref_spec}` not found in {url}")))?;
+    let sha = line
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| FetchError::Git(format!("malformed ls-remote output for {url}")))?;
+    if sha.len() < 7 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(FetchError::Git(format!(
+            "unexpected sha `{sha}` from ls-remote"
+        )));
+    }
+    Ok(sha.to_owned())
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> FetchResult<()> {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .map_err(|e| FetchError::Git(format!("invoking git {args:?}: {e}")))?;
+    if !output.status.success() {
+        return Err(FetchError::Git(format!(
+            "git {args:?} in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 fn fetch_http(source: &Source, url: &str) -> FetchResult<Fetched> {
@@ -404,15 +536,18 @@ mod tests {
     }
 
     #[test]
-    fn github_unsupported_for_now() {
-        let src = Source::Github {
-            repo: "acme/x".into(),
-            git_ref: None,
-            path: None,
-        };
-        // github is now supported — but with empty ref resolve it will
-        // likely fail network-bound, so skip direct assertion.
-        let _ = src;
+    fn github_clone_url_format() {
+        assert_eq!(
+            github_clone_url("anthropics/claude-code"),
+            "https://github.com/anthropics/claude-code.git"
+        );
+    }
+
+    #[test]
+    fn github_cache_dir_shape() {
+        let p = github_cache_dir("owner", "repo", "abc123").unwrap();
+        let s = p.to_string_lossy();
+        assert!(s.contains(".rig/cache/github/owner/repo@abc123"));
     }
 
     #[test]
