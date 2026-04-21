@@ -6,11 +6,17 @@ import type {
   Scope,
   UnitTypeId,
 } from "./types";
-import { detectDrift, listAgents, listUnits } from "./lib/api";
+import {
+  detectDrift,
+  listAgents,
+  listUnits,
+  uninstallUnit,
+} from "./lib/api";
 import Sidebar from "./components/Sidebar";
 import UnitTable, { type UnitRow } from "./components/UnitTable";
 import DetailPane from "./components/DetailPane";
 import ScopePill from "./components/ScopePill";
+import InstallModal from "./components/InstallModal";
 
 export default function App() {
   const [agents, setAgents] = useState<AgentDto[]>([]);
@@ -23,6 +29,8 @@ export default function App() {
   const [selected, setSelected] = useState<UnitRow | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showInstall, setShowInstall] = useState(false);
+  const [busyUninstall, setBusyUninstall] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -97,6 +105,12 @@ export default function App() {
         <div className="flex items-center gap-3">
           <ScopePill scope={scope} onChange={setScope} />
           <button
+            onClick={() => setShowInstall(true)}
+            className="rounded bg-indigo-600 px-3 py-1 text-sm text-white shadow-sm hover:bg-indigo-700"
+          >
+            + Install
+          </button>
+          <button
             onClick={refresh}
             className="rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
           >
@@ -104,6 +118,15 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {showInstall && (
+        <InstallModal
+          agents={agents}
+          scope={scope}
+          onClose={() => setShowInstall(false)}
+          onInstalled={refresh}
+        />
+      )}
 
       {error && (
         <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
@@ -132,6 +155,26 @@ export default function App() {
             paths={selected.paths}
             scope={scope}
             drift={selected.drift}
+            busy={busyUninstall}
+            onUninstall={async () => {
+              if (!confirm(`Uninstall ${selected.unitType}/${selected.name} from ${selected.agent}?`)) return;
+              setBusyUninstall(true);
+              setError(null);
+              try {
+                await uninstallUnit(
+                  scope,
+                  selected.agent,
+                  selected.unitType as UnitTypeId,
+                  selected.name,
+                );
+                setSelected(null);
+                await refresh();
+              } catch (e) {
+                setError(String(e));
+              } finally {
+                setBusyUninstall(false);
+              }
+            }}
           />
         )}
       </div>

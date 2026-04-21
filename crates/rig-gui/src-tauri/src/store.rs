@@ -59,6 +59,22 @@ pub fn load_lockfile(scope: Scope, project_root: Option<&Path>) -> Result<Lockfi
     Lockfile::parse(s).with_context(|| format!("parsing {}", p.display()))
 }
 
+pub fn save_manifest(scope: Scope, project_root: Option<&Path>, manifest: &Manifest) -> Result<()> {
+    let p = manifest_path(scope, project_root)?;
+    let toml_str =
+        toml::to_string_pretty(manifest).with_context(|| "serializing manifest to TOML")?;
+    rig_fs::atomic_write(&p, toml_str.as_bytes())
+        .with_context(|| format!("writing {}", p.display()))?;
+    Ok(())
+}
+
+pub fn save_lockfile(scope: Scope, project_root: Option<&Path>, lockfile: &Lockfile) -> Result<()> {
+    let p = lockfile_path(scope, project_root)?;
+    let s = lockfile.to_toml().with_context(|| "serializing lockfile")?;
+    rig_fs::atomic_write(&p, s.as_bytes()).with_context(|| format!("writing {}", p.display()))?;
+    Ok(())
+}
+
 pub fn empty_manifest() -> Manifest {
     Manifest {
         schema: SCHEMA.to_owned(),

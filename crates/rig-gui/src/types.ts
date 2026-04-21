@@ -63,3 +63,9 @@ export interface ScopeRootsDto {
   claudeGlobal: string;
   codexGlobal: string;
 }
+
+export interface InstallResultDto {
+  installed: InstalledUnitDto[];
+  skipped: string[];
+  sourceSha: string;
+}

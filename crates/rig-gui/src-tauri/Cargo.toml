@@ -22,6 +22,7 @@ tauri-build = { workspace = true }
 [dependencies]
 rig-core = { workspace = true }
 rig-fs = { workspace = true }
+rig-source = { workspace = true }
 rig-adapter-claude = { workspace = true }
 rig-adapter-codex = { workspace = true }
 tauri = { workspace = true }

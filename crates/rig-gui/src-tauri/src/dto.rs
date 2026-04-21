@@ -74,6 +74,14 @@ pub struct ScopeRootsDto {
     pub codex_global: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallResultDto {
+    pub installed: Vec<InstalledUnitDto>,
+    pub skipped: Vec<String>,
+    pub source_sha: String,
+}
+
 pub fn unit_type_slug(t: UnitType) -> &'static str {
     match t {
         UnitType::Skill => "skill",

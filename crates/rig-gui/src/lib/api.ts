@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentDto,
   DriftReportDto,
+  InstallResultDto,
   InstalledUnitDto,
   LockfileDto,
   ManifestDto,
@@ -53,3 +54,26 @@ export const readLockfile = (scope: Scope, projectPath?: string) =>
   invoke<LockfileDto>("read_lockfile", { scope, projectPath });
 
 export const scopeRoots = () => invoke<ScopeRootsDto>("scope_roots");
+
+export const installUnit = (params: {
+  scope: Scope;
+  source: string;
+  agents: string[];
+  asType?: UnitTypeId;
+  projectPath?: string;
+}) => invoke<InstallResultDto>("install_unit", params);
+
+export const uninstallUnit = (
+  scope: Scope,
+  agent: string,
+  unitType: UnitTypeId,
+  name: string,
+  projectPath?: string,
+) =>
+  invoke<void>("uninstall_unit", {
+    scope,
+    projectPath,
+    agent,
+    unitType,
+    name,
+  });

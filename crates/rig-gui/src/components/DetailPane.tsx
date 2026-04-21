@@ -11,6 +11,8 @@ interface Props {
   paths: string[];
   scope: Scope;
   drift: DriftReportDto | null | undefined;
+  onUninstall?: () => void;
+  busy?: boolean;
 }
 
 export default function DetailPane({
@@ -20,6 +22,8 @@ export default function DetailPane({
   paths,
   scope,
   drift,
+  onUninstall,
+  busy,
 }: Props) {
   const [body, setBody] = useState<UnitBodyDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -39,8 +43,17 @@ export default function DetailPane({
           {agent} · {unitType}
         </div>
         <h2 className="text-lg font-semibold">{name}</h2>
-        <div className="mt-2">
+        <div className="mt-2 flex items-center justify-between gap-2">
           <DriftBadge state={drift?.state ?? null} />
+          {onUninstall && (
+            <button
+              onClick={onUninstall}
+              disabled={busy}
+              className="rounded border border-red-300 bg-white px-2 py-0.5 text-xs text-red-700 shadow-sm hover:bg-red-50 disabled:opacity-50"
+            >
+              {busy ? "Removing…" : "Uninstall"}
+            </button>
+          )}
         </div>
       </div>
 

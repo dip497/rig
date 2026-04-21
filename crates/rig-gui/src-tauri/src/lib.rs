@@ -10,14 +10,19 @@ pub mod store;
 
 use std::path::{Path, PathBuf};
 
+use rig_adapter_claude::{CommandConverter, RuleConverter, SkillConverter, SubagentConverter};
 use rig_core::adapter::{Adapter, UnitRef};
+use rig_core::agent::AgentId;
+use rig_core::converter::Converter;
+use rig_core::lockfile::LockEntry;
 use rig_core::scope::Scope;
+use rig_core::source::Source;
 use rig_core::unit::{Unit, UnitType};
 use tauri::State;
 
 use crate::dto::{
-    unit_type_slug, AgentDto, DriftReportDto, InstalledUnitDto, LockfileDto, ManifestDto, ScopeDto,
-    ScopeRootsDto, UnitBodyDto, UnitTypeDto,
+    unit_type_slug, AgentDto, DriftReportDto, InstallResultDto, InstalledUnitDto, LockfileDto,
+    ManifestDto, ScopeDto, ScopeRootsDto, UnitBodyDto, UnitTypeDto,
 };
 use crate::state::AppState;
 
@@ -200,6 +205,140 @@ fn scope_roots() -> Result<ScopeRootsDto, String> {
     })
 }
 
+fn parse_unit_from_native(
+    unit_type: UnitType,
+    native: &rig_core::converter::NativeLayout,
+) -> Result<Unit, String> {
+    Ok(match unit_type {
+        UnitType::Skill => Unit::Skill(SkillConverter.parse_native(native).map_err(map_err)?),
+        UnitType::Rule => Unit::Rule(RuleConverter.parse_native(native).map_err(map_err)?),
+        UnitType::Command => Unit::Command(CommandConverter.parse_native(native).map_err(map_err)?),
+        UnitType::Subagent => {
+            Unit::Subagent(SubagentConverter.parse_native(native).map_err(map_err)?)
+        }
+        other => return Err(format!("unit type `{other:?}` not yet supported by GUI")),
+    })
+}
+
+#[tauri::command]
+fn install_unit(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    source: String,
+    as_type: Option<UnitTypeDto>,
+    agents: Vec<String>,
+) -> Result<InstallResultDto, String> {
+    let parsed = Source::parse(&source).map_err(map_err)?;
+    let fetched = rig_source::fetch(&parsed).map_err(map_err)?;
+    let unit_type = match (fetched.detected, as_type) {
+        (_, Some(t)) => t,
+        (Some(t), None) => t,
+        (None, None) => {
+            return Err("could not auto-detect unit type; pass as_type".into());
+        }
+    };
+    let unit = parse_unit_from_native(unit_type, &fetched.native)?;
+    let source_sha = fetched.source_sha.as_str().to_owned();
+
+    let root = project_root(project_path);
+    let mut lock = store::load_lockfile(scope, root.as_deref()).map_err(map_err)?;
+    let mut installed: Vec<InstalledUnitDto> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+
+    for agent_id in &agents {
+        let Some(adapter) = state.adapter_by_id(agent_id) else {
+            skipped.push(format!("unknown agent `{agent_id}`"));
+            continue;
+        };
+        if !adapter.capabilities().contains(&unit_type) {
+            skipped.push(format!(
+                "{agent_id} does not support {}",
+                unit_type_slug(unit_type)
+            ));
+            continue;
+        }
+        let receipt = adapter.install(&unit, scope).map_err(map_err)?;
+        let id = format!("{}/{}", unit_type_slug(unit_type), parsed);
+
+        lock.entries
+            .retain(|e| !(e.id == id && e.agent == receipt.agent && e.scope == scope));
+        lock.entries.push(LockEntry {
+            id,
+            unit_type,
+            source: parsed.clone(),
+            source_sha: fetched.source_sha.clone(),
+            install_sha: receipt.install_sha.clone(),
+            agent: receipt.agent.clone(),
+            scope,
+            path: receipt.paths.first().cloned().unwrap_or_else(PathBuf::new),
+        });
+        installed.push(InstalledUnitDto {
+            agent: agent_id.clone(),
+            unit_type: unit_type_slug(unit_type).to_owned(),
+            name: receipt.unit_ref.name.clone(),
+            paths: receipt.paths,
+        });
+    }
+
+    if !installed.is_empty() {
+        store::save_lockfile(scope, root.as_deref(), &lock).map_err(map_err)?;
+    }
+
+    Ok(InstallResultDto {
+        installed,
+        skipped,
+        source_sha,
+    })
+}
+
+#[tauri::command]
+fn uninstall_unit(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    agent: String,
+    unit_type: UnitTypeDto,
+    name: String,
+) -> Result<(), String> {
+    let adapter = state
+        .adapter_by_id(&agent)
+        .ok_or_else(|| format!("unknown agent `{agent}`"))?;
+    if !adapter.capabilities().contains(&unit_type) {
+        return Err(format!(
+            "{agent} does not support {}",
+            unit_type_slug(unit_type)
+        ));
+    }
+    adapter
+        .uninstall(&UnitRef::new(unit_type, name.clone()), scope)
+        .map_err(map_err)?;
+
+    let root = project_root(project_path);
+    let agent_id = AgentId::new(&agent);
+    let mut lock = store::load_lockfile(scope, root.as_deref()).map_err(map_err)?;
+    let before = lock.entries.len();
+    lock.entries.retain(|e| {
+        if e.unit_type != unit_type || e.agent != agent_id || e.scope != scope {
+            return true;
+        }
+        // Skill layout: <type_root>/<name>/SKILL.md → match parent dir name.
+        // Single-file layout: <type_root>/<name>.md → match file_stem.
+        let matches_dir = e
+            .path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some(name.as_str());
+        let matches_stem = e.path.file_stem().and_then(|s| s.to_str()) == Some(name.as_str());
+        !(matches_dir || matches_stem)
+    });
+    if lock.entries.len() != before {
+        store::save_lockfile(scope, root.as_deref(), &lock).map_err(map_err)?;
+    }
+    Ok(())
+}
+
 // Silence unused-imports when no test feature picks them up.
 #[allow(dead_code)]
 fn _type_assertions(_: UnitType, _: Scope, _: &dyn Adapter, _: &Path) {}
@@ -216,6 +355,8 @@ pub fn run() {
             read_manifest,
             read_lockfile,
             scope_roots,
+            install_unit,
+            uninstall_unit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Rig GUI");
