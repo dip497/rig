@@ -414,6 +414,13 @@ fn detect(path: &Path) -> FetchResult<(PathBuf, Option<UnitType>)> {
         return Ok((root, Some(UnitType::Skill)));
     }
 
+    // `mcp.toml` at the root (or passed directly as the file) → Mcp.
+    // Per `docs/MCP-SUPPORT.md` §3, the MCP source format is a single
+    // `mcp.toml` file. Adapter-side `parse_native` consumes it.
+    if root.join("mcp.toml").exists() || file_hint.as_deref() == Some("mcp.toml") {
+        return Ok((root, Some(UnitType::Mcp)));
+    }
+
     if is_single_file {
         // Single markdown file → caller hints the type.
         return Ok((root, None));
@@ -479,6 +486,41 @@ mod tests {
         assert_eq!(f.detected, Some(UnitType::Skill));
         assert_eq!(f.native.files.len(), 1);
         assert_eq!(f.native.files[0].relative_path, "SKILL.md");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fetches_local_mcp_dir() {
+        let dir = tempdir("mcp");
+        fs::write(
+            dir.join("mcp.toml"),
+            "schema = \"rig/v1\"\nkind = \"mcp\"\nname = \"demo\"\n\n[transport]\nkind = \"stdio\"\ncommand = \"echo\"\n",
+        )
+        .unwrap();
+        let src = Source::Local {
+            path: dir.to_string_lossy().into_owned(),
+        };
+        let f = fetch(&src).unwrap();
+        assert_eq!(f.detected, Some(UnitType::Mcp));
+        assert!(f.native.files.iter().any(|f| f.relative_path == "mcp.toml"));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fetches_direct_mcp_toml_file() {
+        let dir = tempdir("mcp-file");
+        let p = dir.join("mcp.toml");
+        fs::write(
+            &p,
+            "schema = \"rig/v1\"\nkind = \"mcp\"\nname = \"demo\"\n\n[transport]\nkind = \"http\"\nurl = \"https://x\"\n",
+        )
+        .unwrap();
+        let src = Source::Local {
+            path: p.to_string_lossy().into_owned(),
+        };
+        let f = fetch(&src).unwrap();
+        assert_eq!(f.detected, Some(UnitType::Mcp));
+        assert_eq!(f.native.files.len(), 1);
         fs::remove_dir_all(&dir).ok();
     }
 

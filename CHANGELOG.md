@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **MCP unit support.** `rig install … --as mcp --agent claude,codex`
+  installs MCP servers via the official `claude mcp` / `codex mcp`
+  CLIs, with full list/status/uninstall/drift parity for skills.
+  New `--scope local` for Claude per-project override (MCP only).
+  Canonical TOML form pins drift SHAs deterministically. See
+  `docs/MCP-SUPPORT.md`.
 - **`rig link` entries are tracked in `links.toml`.** `list`, `search`,
   `stats`, and `doctor` now surface linked skills (plain-text output
   marks them `(linked)`; JSON adds a `"linked": true` field). New

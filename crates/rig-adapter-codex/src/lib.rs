@@ -18,6 +18,7 @@
 
 mod command;
 mod frontmatter;
+pub mod mcp;
 mod rule;
 mod skill;
 mod subagent;
@@ -34,6 +35,7 @@ use rig_core::source::Sha256;
 use rig_core::unit::{Unit, UnitType};
 
 pub use command::CommandConverter;
+pub use mcp::MCPConverter;
 pub use rule::RuleConverter;
 pub use skill::SkillConverter;
 pub use subagent::SubagentConverter;
@@ -58,6 +60,8 @@ fn scope_root(scope: Scope) -> AdapterResult<PathBuf> {
             Ok(home.join(".codex"))
         }
         Scope::Project => Ok(PathBuf::from(".codex")),
+        // `Scope::Local` is Claude-only. Codex rejects it outright.
+        Scope::Local => Err(AdapterError::Unsupported(UnitType::Mcp)),
     }
 }
 
@@ -75,12 +79,27 @@ fn primary_path(scope: Scope, unit_type: UnitType, name: &str) -> AdapterResult<
     })
 }
 
-pub struct CodexAdapter;
+pub struct CodexAdapter {
+    /// Cached result of the one-shot `codex mcp --help` probe. Set at
+    /// construction time; `capabilities()` reads this and `install` /
+    /// `uninstall` / `list` short-circuit with `Unsupported` when
+    /// false. Spec §5 / §11.
+    mcp_supported: bool,
+}
 
 impl CodexAdapter {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            mcp_supported: mcp::probe_supported(),
+        }
+    }
+
+    /// Construct an adapter with an explicit MCP support flag. Useful
+    /// in tests where you want to avoid the PATH probe.
+    #[must_use]
+    pub fn with_mcp_support(mcp_supported: bool) -> Self {
+        Self { mcp_supported }
     }
 }
 
@@ -96,17 +115,34 @@ impl Adapter for CodexAdapter {
     }
 
     fn capabilities(&self) -> BTreeSet<UnitType> {
-        [
+        let mut caps: BTreeSet<UnitType> = [
             UnitType::Skill,
             UnitType::Rule,
             UnitType::Command,
             UnitType::Subagent,
         ]
         .into_iter()
-        .collect()
+        .collect();
+        if self.mcp_supported {
+            caps.insert(UnitType::Mcp);
+        }
+        caps
     }
 
     fn install(&self, unit: &Unit, scope: Scope) -> AdapterResult<Receipt> {
+        if let Unit::Mcp(m) = unit {
+            if !self.mcp_supported {
+                return Err(AdapterError::Unsupported(UnitType::Mcp));
+            }
+            let (install_sha, path) = mcp::install(m, scope)?;
+            return Ok(Receipt {
+                unit_ref: UnitRef::new(UnitType::Mcp, m.name.clone()),
+                agent: self.agent(),
+                scope,
+                paths: vec![path],
+                install_sha,
+            });
+        }
         let (unit_type, name, native) = to_native(unit)?;
 
         let (install_root, paths, install_sha) = match unit_type {
@@ -155,6 +191,12 @@ impl Adapter for CodexAdapter {
     }
 
     fn uninstall(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<()> {
+        if unit_ref.unit_type == UnitType::Mcp {
+            if !self.mcp_supported {
+                return Err(AdapterError::Unsupported(UnitType::Mcp));
+            }
+            return mcp::uninstall(&unit_ref.name, scope);
+        }
         let p = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         match unit_ref.unit_type {
             UnitType::Skill => {
@@ -174,6 +216,29 @@ impl Adapter for CodexAdapter {
 
     fn list(&self, scope: Scope) -> AdapterResult<Vec<InstalledUnit>> {
         let mut out = Vec::new();
+
+        // MCP entries (global scope only per spec §5). Silently ignore
+        // errors reading the config — a missing / malformed config
+        // should not poison the whole listing.
+        if self.mcp_supported && matches!(scope, Scope::Global) {
+            if let Ok(mcps) = mcp::list_native() {
+                if let Ok(cfg) = mcp::config_path_public(scope) {
+                    for m in mcps {
+                        out.push(InstalledUnit {
+                            unit_ref: UnitRef::new(UnitType::Mcp, m.name),
+                            scope,
+                            paths: vec![cfg.clone()],
+                        });
+                    }
+                }
+            }
+        }
+
+        // Codex has no file-backed units under `Scope::Local`.
+        if matches!(scope, Scope::Local) {
+            return Ok(out);
+        }
+
         for ty in [
             UnitType::Skill,
             UnitType::Rule,
@@ -233,6 +298,12 @@ impl Adapter for CodexAdapter {
     }
 
     fn read_local(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<Unit> {
+        if unit_ref.unit_type == UnitType::Mcp {
+            if !self.mcp_supported {
+                return Err(AdapterError::Unsupported(UnitType::Mcp));
+            }
+            return Ok(Unit::Mcp(mcp::read_local(unit_ref, scope)?));
+        }
         let primary = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         let native = match unit_ref.unit_type {
             UnitType::Skill => {
@@ -279,6 +350,23 @@ impl Adapter for CodexAdapter {
         install_time: Sha256,
         upstream: Option<Sha256>,
     ) -> AdapterResult<(DriftState, DriftShas)> {
+        if unit_ref.unit_type == UnitType::Mcp {
+            if !self.mcp_supported {
+                return Err(AdapterError::Unsupported(UnitType::Mcp));
+            }
+            let current = mcp::current_sha(&unit_ref.name, scope)?;
+            let shas = DriftShas {
+                install_time,
+                current_disk: current.clone(),
+                upstream,
+            };
+            let state = if current.is_none() {
+                DriftState::Missing
+            } else {
+                shas.classify()
+            };
+            return Ok((state, shas));
+        }
         let primary = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         let current = match unit_ref.unit_type {
             UnitType::Skill => {
@@ -344,6 +432,7 @@ fn to_native(unit: &Unit) -> AdapterResult<(UnitType, String, NativeLayout)> {
             u.name.clone(),
             SubagentConverter.to_native(u)?,
         )),
+        Unit::Mcp(u) => Ok((UnitType::Mcp, u.name.clone(), MCPConverter.to_native(u)?)),
         _ => Err(AdapterError::Unsupported(unit.unit_type())),
     }
 }
@@ -354,6 +443,7 @@ fn from_native(unit_type: UnitType, native: &NativeLayout) -> AdapterResult<Unit
         UnitType::Rule => Unit::Rule(RuleConverter.parse_native(native)?),
         UnitType::Command => Unit::Command(CommandConverter.parse_native(native)?),
         UnitType::Subagent => Unit::Subagent(SubagentConverter.parse_native(native)?),
+        UnitType::Mcp => Unit::Mcp(MCPConverter.parse_native(native)?),
         other => return Err(AdapterError::Unsupported(other)),
     })
 }
@@ -575,18 +665,57 @@ mod tests {
 
     #[test]
     fn unsupported_unit_errors() {
-        let adapter = CodexAdapter::new();
-        let mcp = Unit::Mcp(rig_core::unit::Mcp {
+        // Hook and Plugin remain Unsupported. Force mcp_supported=false
+        // so the test is deterministic regardless of PATH state.
+        let adapter = CodexAdapter::with_mcp_support(false);
+        let hook = Unit::Hook(rig_core::unit::Hook {
+            name: "x".into(),
+            event: rig_core::unit::HookEvent::PreToolUse,
+            matcher: None,
+            command: "echo".into(),
+            description: None,
+        });
+        assert!(matches!(
+            adapter.install(&hook, Scope::Project),
+            Err(AdapterError::Unsupported(UnitType::Hook))
+        ));
+    }
+
+    #[test]
+    fn mcp_disabled_when_probe_fails() {
+        let adapter = CodexAdapter::with_mcp_support(false);
+        assert!(!adapter.capabilities().contains(&UnitType::Mcp));
+        let m = Unit::Mcp(rig_core::unit::Mcp {
             name: "x".into(),
             description: None,
             transport: rig_core::unit::Transport::Http {
                 url: "https://x".into(),
+                headers: Default::default(),
             },
             env: Vec::new(),
             metadata: Default::default(),
         });
         assert!(matches!(
-            adapter.install(&mcp, Scope::Project),
+            adapter.install(&m, Scope::Global),
+            Err(AdapterError::Unsupported(UnitType::Mcp))
+        ));
+    }
+
+    #[test]
+    fn mcp_project_scope_rejected() {
+        let adapter = CodexAdapter::with_mcp_support(true);
+        let m = Unit::Mcp(rig_core::unit::Mcp {
+            name: "x".into(),
+            description: None,
+            transport: rig_core::unit::Transport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
+            env: Vec::new(),
+            metadata: Default::default(),
+        });
+        assert!(matches!(
+            adapter.install(&m, Scope::Project),
             Err(AdapterError::Unsupported(UnitType::Mcp))
         ));
     }

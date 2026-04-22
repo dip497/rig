@@ -19,7 +19,11 @@ pub fn scope_dir(scope: Scope) -> Result<PathBuf> {
             let home = rig_fs::home_dir().context("discovering home dir")?;
             Ok(home.join(".rig"))
         }
-        Scope::Project => Ok(PathBuf::from(".rig")),
+        // `Local` is the Claude-only per-project override (MCP only).
+        // For the Rig-side manifest/lockfile it shares the project
+        // `.rig/` directory — the distinction is purely for how the
+        // Claude adapter dispatches `claude mcp add --scope local`.
+        Scope::Project | Scope::Local => Ok(PathBuf::from(".rig")),
     }
 }
 

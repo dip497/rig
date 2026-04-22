@@ -21,7 +21,9 @@ pub fn scope_dir(scope: Scope, project_root: Option<&Path>) -> Result<PathBuf> {
             let home = rig_fs::home_dir().context("discovering home dir")?;
             Ok(home.join(".rig"))
         }
-        Scope::Project => {
+        Scope::Project | Scope::Local => {
+            // `Local` is Claude-only for MCP; the Rig-side `.rig/` dir
+            // for Local shares the project root per MCP-SUPPORT.md §9.
             let root = project_root
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));

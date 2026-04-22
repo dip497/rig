@@ -1,4 +1,5 @@
-//! Install scope: global (`~/.rig/`) or project (`./.rig/`).
+//! Install scope: global (`~/.rig/`), project (`./.rig/`), or Claude's
+//! per-project `local` override.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -8,6 +9,11 @@ use std::fmt;
 pub enum Scope {
     Global,
     Project,
+    /// Claude-only per-project override; typically gitignored. Valid
+    /// only for MCP units on the Claude adapter (see
+    /// `docs/MCP-SUPPORT.md` §8). Any other adapter/unit-type
+    /// combination must reject with `AdapterError::Unsupported`.
+    Local,
 }
 
 impl fmt::Display for Scope {
@@ -15,6 +21,7 @@ impl fmt::Display for Scope {
         f.write_str(match self {
             Self::Global => "global",
             Self::Project => "project",
+            Self::Local => "local",
         })
     }
 }

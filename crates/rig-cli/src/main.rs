@@ -10,7 +10,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use rig_adapter_claude::{
-    ClaudeAdapter, CommandConverter, RuleConverter, SkillConverter, SubagentConverter,
+    ClaudeAdapter, CommandConverter, MCPConverter as ClaudeMCPConverter, RuleConverter,
+    SkillConverter, SubagentConverter,
 };
 use rig_adapter_codex::CodexAdapter;
 use rig_core::adapter::{Adapter, InstalledUnit, Receipt, UnitRef};
@@ -150,6 +151,9 @@ enum Command {
 enum CliScope {
     Global,
     Project,
+    /// Claude-only per-project override, MCP units only. Validated
+    /// inside the adapter; see `docs/MCP-SUPPORT.md` §8.
+    Local,
 }
 
 impl From<CliScope> for CoreScope {
@@ -157,6 +161,7 @@ impl From<CliScope> for CoreScope {
         match s {
             CliScope::Global => Self::Global,
             CliScope::Project => Self::Project,
+            CliScope::Local => Self::Local,
         }
     }
 }
@@ -166,6 +171,7 @@ impl From<CliScope> for CoreScope {
 enum CliScopeAll {
     Global,
     Project,
+    Local,
     All,
 }
 
@@ -174,7 +180,8 @@ impl CliScopeAll {
         match self {
             Self::Global => vec![CoreScope::Global],
             Self::Project => vec![CoreScope::Project],
-            Self::All => vec![CoreScope::Global, CoreScope::Project],
+            Self::Local => vec![CoreScope::Local],
+            Self::All => vec![CoreScope::Global, CoreScope::Project, CoreScope::Local],
         }
     }
 }
@@ -222,6 +229,7 @@ enum CliUnitType {
     Rule,
     Command,
     Subagent,
+    Mcp,
 }
 
 impl From<CliUnitType> for UnitType {
@@ -231,6 +239,7 @@ impl From<CliUnitType> for UnitType {
             CliUnitType::Rule => Self::Rule,
             CliUnitType::Command => Self::Command,
             CliUnitType::Subagent => Self::Subagent,
+            CliUnitType::Mcp => Self::Mcp,
         }
     }
 }
@@ -393,6 +402,7 @@ fn canonical_name(unit: &Unit) -> String {
         Unit::Rule(u) => u.name.clone(),
         Unit::Command(u) => u.name.clone(),
         Unit::Subagent(u) => u.name.clone(),
+        Unit::Mcp(u) => u.name.clone(),
         _ => String::new(),
     }
 }
@@ -694,6 +704,11 @@ fn fetch_unit(
                 .parse_native(&fetched.native)
                 .with_context(|| format!("parsing subagent from `{source_ref}`"))?,
         ),
+        UnitType::Mcp => Unit::Mcp(
+            ClaudeMCPConverter
+                .parse_native(&fetched.native)
+                .with_context(|| format!("parsing mcp from `{source_ref}`"))?,
+        ),
         other => bail!("unit type `{other:?}` not yet supported by the CLI"),
     };
 
@@ -747,6 +762,11 @@ fn upsert_lock(
     let id = lock_id(receipt.unit_ref.unit_type, source);
     lock.entries
         .retain(|e| !(e.id == id && e.agent == receipt.agent && e.scope == scope));
+    let native_name = if receipt.unit_ref.unit_type == UnitType::Mcp {
+        Some(receipt.unit_ref.name.clone())
+    } else {
+        None
+    };
     lock.entries.push(LockEntry {
         id,
         unit_type: receipt.unit_ref.unit_type,
@@ -760,6 +780,8 @@ fn upsert_lock(
             .first()
             .cloned()
             .unwrap_or_else(|| std::path::PathBuf::from("")),
+        native_name,
+        extra: Default::default(),
     });
     store::save_lockfile(scope, &lock)
 }
@@ -838,6 +860,11 @@ fn sync(scope: CoreScope, on_drift: OnDrift) -> Result<()> {
                     receipt.unit_ref.name,
                     adapter.agent(),
                 );
+                let native_name = if ty == UnitType::Mcp {
+                    Some(receipt.unit_ref.name.clone())
+                } else {
+                    None
+                };
                 new_lock.entries.push(LockEntry {
                     id: lock_id(ty, &source),
                     unit_type: ty,
@@ -847,6 +874,8 @@ fn sync(scope: CoreScope, on_drift: OnDrift) -> Result<()> {
                     agent: receipt.agent,
                     scope,
                     path: receipt.paths.into_iter().next().unwrap_or_default(),
+                    native_name,
+                    extra: Default::default(),
                 });
                 installed += 1;
             }
@@ -941,7 +970,11 @@ fn status(scope: CoreScope, json: bool) -> Result<()> {
             }
         };
         checked += 1;
-        let name = if e.unit_type == UnitType::Skill {
+        let name = if let Some(n) = &e.native_name {
+            // MCP (and any future agent-entry-backed unit) keeps its
+            // canonical name in `native_name` rather than the path.
+            n.clone()
+        } else if e.unit_type == UnitType::Skill {
             e.path
                 .parent()
                 .and_then(|p| p.file_name())
@@ -1255,7 +1288,9 @@ fn unlink(target: &str, agents: Option<&[CliAgent]>, scope: CoreScope) -> Result
 fn link_target(ag: CliAgent, scope: CoreScope, name: &str) -> Result<PathBuf> {
     let root: PathBuf = match scope {
         CoreScope::Global => rig_fs::home_dir().context("discovering home dir")?,
-        CoreScope::Project => PathBuf::from("."),
+        // `Local` is Claude-only for MCP — `rig link` is a skill
+        // symlink helper, so both Project and Local point at the CWD.
+        CoreScope::Project | CoreScope::Local => PathBuf::from("."),
     };
     let sub = match ag {
         CliAgent::Claude => [".claude", "skills"],
@@ -1691,6 +1726,7 @@ fn scope_slug(s: CoreScope) -> &'static str {
     match s {
         CoreScope::Global => "global",
         CoreScope::Project => "project",
+        CoreScope::Local => "local",
     }
 }
 

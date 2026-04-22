@@ -16,6 +16,7 @@
 
 mod command;
 mod frontmatter;
+pub mod mcp;
 mod rule;
 mod skill;
 mod subagent;
@@ -32,6 +33,7 @@ use rig_core::source::Sha256;
 use rig_core::unit::{Unit, UnitType};
 
 pub use command::CommandConverter;
+pub use mcp::MCPConverter;
 pub use rule::RuleConverter;
 pub use skill::SkillConverter;
 pub use subagent::SubagentConverter;
@@ -56,6 +58,13 @@ fn scope_root(scope: Scope) -> AdapterResult<PathBuf> {
             Ok(home.join(".claude"))
         }
         Scope::Project => Ok(PathBuf::from(".claude")),
+        // `Local` is MCP-only; MCP ops bypass `scope_root`. If a file-
+        // backed path is requested under `Local`, it's a bug — fail
+        // loud per `docs/MCP-SUPPORT.md` §8.
+        Scope::Local => Err(AdapterError::Other {
+            message: "scope `local` is only supported for MCP units on claude".into(),
+            source: None,
+        }),
     }
 }
 
@@ -99,12 +108,30 @@ impl Adapter for ClaudeAdapter {
             UnitType::Rule,
             UnitType::Command,
             UnitType::Subagent,
+            UnitType::Mcp,
         ]
         .into_iter()
         .collect()
     }
 
     fn install(&self, unit: &Unit, scope: Scope) -> AdapterResult<Receipt> {
+        // MCP units route through `claude mcp add` instead of writing
+        // files directly. Spec §4.
+        if let Unit::Mcp(m) = unit {
+            mcp::validate_scope(UnitType::Mcp, scope)?;
+            let (install_sha, path) = mcp::install(m, scope)?;
+            return Ok(Receipt {
+                unit_ref: UnitRef::new(UnitType::Mcp, m.name.clone()),
+                agent: self.agent(),
+                scope,
+                paths: vec![path],
+                install_sha,
+            });
+        }
+
+        // Any non-MCP unit under `Scope::Local` is invalid.
+        mcp::validate_scope(unit.unit_type(), scope)?;
+
         let (unit_type, name, native) = to_native(unit)?;
 
         let (install_root, paths, install_sha) = match unit_type {
@@ -153,6 +180,11 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn uninstall(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<()> {
+        if unit_ref.unit_type == UnitType::Mcp {
+            mcp::validate_scope(UnitType::Mcp, scope)?;
+            return mcp::uninstall(&unit_ref.name, scope);
+        }
+        mcp::validate_scope(unit_ref.unit_type, scope)?;
         let p = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         match unit_ref.unit_type {
             UnitType::Skill => {
@@ -172,6 +204,28 @@ impl Adapter for ClaudeAdapter {
 
     fn list(&self, scope: Scope) -> AdapterResult<Vec<InstalledUnit>> {
         let mut out = Vec::new();
+
+        // MCP entries: enumerate native config. Higher-level callers
+        // (CLI `list`) intersect with the lockfile to hide foreign
+        // entries per `docs/MCP-SUPPORT.md` §6.
+        if matches!(scope, Scope::Global | Scope::Project | Scope::Local) {
+            if let Ok(mcps) = mcp::list_native(scope) {
+                let cfg = mcp::config_path(scope)?;
+                for m in mcps {
+                    out.push(InstalledUnit {
+                        unit_ref: UnitRef::new(UnitType::Mcp, m.name),
+                        scope,
+                        paths: vec![cfg.clone()],
+                    });
+                }
+            }
+        }
+
+        // File-backed unit types don't exist under `Scope::Local`.
+        if matches!(scope, Scope::Local) {
+            return Ok(out);
+        }
+
         for ty in [
             UnitType::Skill,
             UnitType::Rule,
@@ -231,6 +285,11 @@ impl Adapter for ClaudeAdapter {
     }
 
     fn read_local(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<Unit> {
+        if unit_ref.unit_type == UnitType::Mcp {
+            mcp::validate_scope(UnitType::Mcp, scope)?;
+            return Ok(Unit::Mcp(mcp::read_local(unit_ref, scope)?));
+        }
+        mcp::validate_scope(unit_ref.unit_type, scope)?;
         let primary = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         let native = match unit_ref.unit_type {
             UnitType::Skill => {
@@ -277,6 +336,22 @@ impl Adapter for ClaudeAdapter {
         install_time: Sha256,
         upstream: Option<Sha256>,
     ) -> AdapterResult<(DriftState, DriftShas)> {
+        if unit_ref.unit_type == UnitType::Mcp {
+            mcp::validate_scope(UnitType::Mcp, scope)?;
+            let current = mcp::current_sha(&unit_ref.name, scope)?;
+            let shas = DriftShas {
+                install_time,
+                current_disk: current.clone(),
+                upstream,
+            };
+            let state = if current.is_none() {
+                DriftState::Missing
+            } else {
+                shas.classify()
+            };
+            return Ok((state, shas));
+        }
+        mcp::validate_scope(unit_ref.unit_type, scope)?;
         let primary = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         let current = match unit_ref.unit_type {
             UnitType::Skill => {
@@ -342,6 +417,7 @@ fn to_native(unit: &Unit) -> AdapterResult<(UnitType, String, NativeLayout)> {
             u.name.clone(),
             SubagentConverter.to_native(u)?,
         )),
+        Unit::Mcp(u) => Ok((UnitType::Mcp, u.name.clone(), MCPConverter.to_native(u)?)),
         _ => Err(AdapterError::Unsupported(unit.unit_type())),
     }
 }
@@ -352,6 +428,7 @@ fn from_native(unit_type: UnitType, native: &NativeLayout) -> AdapterResult<Unit
         UnitType::Rule => Unit::Rule(RuleConverter.parse_native(native)?),
         UnitType::Command => Unit::Command(CommandConverter.parse_native(native)?),
         UnitType::Subagent => Unit::Subagent(SubagentConverter.parse_native(native)?),
+        UnitType::Mcp => Unit::Mcp(MCPConverter.parse_native(native)?),
         other => return Err(AdapterError::Unsupported(other)),
     })
 }
@@ -528,19 +605,39 @@ mod tests {
 
     #[test]
     fn unsupported_unit_errors() {
+        // Hook and Plugin remain Unsupported in M1.
         let adapter = ClaudeAdapter::new();
-        let mcp = Unit::Mcp(rig_core::unit::Mcp {
+        let hook = Unit::Hook(rig_core::unit::Hook {
             name: "x".into(),
+            event: rig_core::unit::HookEvent::PreToolUse,
+            matcher: None,
+            command: "echo".into(),
             description: None,
-            transport: rig_core::unit::Transport::Http {
-                url: "https://x".into(),
-            },
-            env: Vec::new(),
-            metadata: Default::default(),
         });
         assert!(matches!(
-            adapter.install(&mcp, Scope::Project),
-            Err(AdapterError::Unsupported(UnitType::Mcp))
+            adapter.install(&hook, Scope::Project),
+            Err(AdapterError::Unsupported(UnitType::Hook))
+        ));
+    }
+
+    #[test]
+    fn mcp_is_supported_in_capabilities() {
+        let adapter = ClaudeAdapter::new();
+        assert!(adapter.capabilities().contains(&UnitType::Mcp));
+    }
+
+    #[test]
+    fn local_scope_rejected_for_non_mcp() {
+        let adapter = ClaudeAdapter::new();
+        let rule = Unit::Rule(rig_core::unit::Rule {
+            name: "r".into(),
+            description: None,
+            body: "x\n".into(),
+            placement: Default::default(),
+        });
+        assert!(matches!(
+            adapter.install(&rule, Scope::Local),
+            Err(AdapterError::Unsupported(UnitType::Rule))
         ));
     }
 }

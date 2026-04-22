@@ -263,6 +263,11 @@ fn install_unit(
 
         lock.entries
             .retain(|e| !(e.id == id && e.agent == receipt.agent && e.scope == scope));
+        let native_name = if unit_type == rig_core::unit::UnitType::Mcp {
+            Some(receipt.unit_ref.name.clone())
+        } else {
+            None
+        };
         lock.entries.push(LockEntry {
             id,
             unit_type,
@@ -272,6 +277,8 @@ fn install_unit(
             agent: receipt.agent.clone(),
             scope,
             path: receipt.paths.first().cloned().unwrap_or_else(PathBuf::new),
+            native_name,
+            extra: Default::default(),
         });
         installed.push(InstalledUnitDto {
             agent: agent_id.clone(),
