@@ -22,7 +22,7 @@ use tauri::State;
 
 use crate::dto::{
     unit_type_slug, AgentDto, DriftReportDto, InstallResultDto, InstalledUnitDto, LockfileDto,
-    ManifestDto, ScopeDto, ScopeRootsDto, UnitBodyDto, UnitTypeDto,
+    ManifestDto, MvResultDto, ScopeDto, ScopeRootsDto, UnitBodyDto, UnitTypeDto,
 };
 use crate::state::AppState;
 
@@ -348,6 +348,230 @@ fn uninstall_unit(
     Ok(())
 }
 
+#[tauri::command]
+fn set_enabled(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    agent: String,
+    unit_type: UnitTypeDto,
+    name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let _ = project_root(project_path);
+    let adapter = state
+        .adapter_by_id(&agent)
+        .ok_or_else(|| format!("unknown agent `{agent}`"))?;
+    adapter
+        .set_enabled(&UnitRef::new(unit_type, name), scope, enabled)
+        .map_err(map_err)
+}
+
+#[tauri::command]
+fn is_enabled(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    agent: String,
+    unit_type: UnitTypeDto,
+    name: String,
+) -> Result<bool, String> {
+    let _ = project_root(project_path);
+    let adapter = state
+        .adapter_by_id(&agent)
+        .ok_or_else(|| format!("unknown agent `{agent}`"))?;
+    adapter
+        .is_enabled(&UnitRef::new(unit_type, name), scope)
+        .map_err(map_err)
+}
+
+/// Per-(agent, unit) scope move. Mirrors the CLI `rig mv` 5-step flow
+/// in crates/rig-cli/src/main.rs::mv but only for a single adapter and
+/// without the multi-agent pre-flight. Steps:
+///   1. Read source lockfile + `read_local` the unit.
+///   2. Query current `is_enabled(from)` to preserve disabled state.
+///   3. `install` into target scope.
+///   4. Append/replace target lockfile entry (carrying source/source_sha).
+///   5. Re-apply disabled state at target if needed.
+///   6. `uninstall` from source.
+///   7. Drop source lockfile entry.
+#[tauri::command]
+fn mv_unit(
+    state: State<'_, AppState>,
+    from_scope: ScopeDto,
+    to_scope: ScopeDto,
+    project_path: Option<String>,
+    agent: String,
+    unit_type: UnitTypeDto,
+    name: String,
+) -> Result<MvResultDto, String> {
+    mv_unit_inner(
+        &state,
+        from_scope,
+        to_scope,
+        project_path,
+        agent,
+        unit_type,
+        name,
+    )
+}
+
+fn mv_unit_inner(
+    state: &AppState,
+    from_scope: Scope,
+    to_scope: Scope,
+    project_path: Option<String>,
+    agent: String,
+    unit_type: UnitType,
+    name: String,
+) -> Result<MvResultDto, String> {
+    let adapter = state
+        .adapter_by_id(&agent)
+        .ok_or_else(|| format!("unknown agent `{agent}`"))?;
+    if !adapter.capabilities().contains(&unit_type) {
+        return Err(format!(
+            "{agent} does not support {}",
+            unit_type_slug(unit_type)
+        ));
+    }
+    if from_scope == to_scope {
+        return Err(format!(
+            "from and to scope are identical ({})",
+            match from_scope {
+                Scope::Global => "global",
+                Scope::Project => "project",
+                Scope::Local => "local",
+            }
+        ));
+    }
+
+    let root = project_root(project_path);
+    let unit_ref = UnitRef::new(unit_type, name.clone());
+    let agent_id = AgentId::new(&agent);
+
+    // Step 1: load source lock + read unit.
+    let src_lock = store::load_lockfile(from_scope, root.as_deref()).map_err(map_err)?;
+    let src_entry = src_lock
+        .entries
+        .iter()
+        .find(|e| {
+            e.unit_type == unit_type
+                && e.agent == agent_id
+                && e.scope == from_scope
+                && lock_entry_name(e) == name
+        })
+        .cloned();
+
+    let unit = adapter.read_local(&unit_ref, from_scope).map_err(map_err)?;
+
+    // Step 2: preserve disabled state.
+    let was_disabled = adapter
+        .is_enabled(&unit_ref, from_scope)
+        .map(|e| !e)
+        .unwrap_or(false);
+
+    // Step 3: install into target.
+    let receipt = adapter.install(&unit, to_scope).map_err(map_err)?;
+
+    // Step 4: update target lockfile.
+    let id = src_entry
+        .as_ref()
+        .map(|e| e.id.clone())
+        .unwrap_or_else(|| format!("{}/{}", unit_type_slug(unit_type), name));
+    let source = src_entry
+        .as_ref()
+        .map(|e| e.source.clone())
+        .unwrap_or_else(|| Source::Local { path: name.clone() });
+    let source_sha = src_entry
+        .as_ref()
+        .map(|e| e.source_sha.clone())
+        .unwrap_or_else(|| receipt.install_sha.clone());
+    let native_name = if unit_type == UnitType::Mcp {
+        Some(receipt.unit_ref.name.clone())
+    } else {
+        None
+    };
+    let extra = src_entry
+        .as_ref()
+        .map(|e| e.extra.clone())
+        .unwrap_or_default();
+
+    let mut target_lock = store::load_lockfile(to_scope, root.as_deref()).map_err(map_err)?;
+    target_lock
+        .entries
+        .retain(|e| !(e.id == id && e.agent == receipt.agent && e.scope == to_scope));
+    target_lock.entries.push(LockEntry {
+        id: id.clone(),
+        unit_type,
+        source,
+        source_sha,
+        install_sha: receipt.install_sha.clone(),
+        agent: receipt.agent.clone(),
+        scope: to_scope,
+        path: receipt.paths.first().cloned().unwrap_or_default(),
+        native_name,
+        extra,
+    });
+    store::save_lockfile(to_scope, root.as_deref(), &target_lock).map_err(map_err)?;
+
+    // Step 5: re-apply disabled state at target.
+    if was_disabled {
+        let _ = adapter.set_enabled(&unit_ref, to_scope, false);
+    }
+
+    // Step 6: uninstall source.
+    adapter.uninstall(&unit_ref, from_scope).map_err(map_err)?;
+
+    // Step 7: drop source lock entry.
+    let mut src_lock_mut = src_lock;
+    src_lock_mut
+        .entries
+        .retain(|e| !(e.id == id && e.agent == agent_id && e.scope == from_scope));
+    store::save_lockfile(from_scope, root.as_deref(), &src_lock_mut).map_err(map_err)?;
+
+    Ok(MvResultDto {
+        from_scope,
+        to_scope,
+        install_sha: receipt.install_sha.as_str().to_owned(),
+        disabled: was_disabled,
+    })
+}
+
+/// Return the logical unit name for a lockfile entry, mirroring the
+/// CLI's `lock_entry_name` — falls back to path basename/parent-name.
+fn lock_entry_name(e: &LockEntry) -> String {
+    if let Some(n) = &e.native_name {
+        return n.clone();
+    }
+    // Skill layout: <root>/<name>/SKILL.md — prefer parent dir name.
+    if let Some(parent) = e
+        .path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|s| s.to_str())
+    {
+        // Use parent name unless it's a generic root like "skills" etc.
+        let stem = e.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if e.path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| n.eq_ignore_ascii_case("SKILL.md"))
+            .unwrap_or(false)
+        {
+            return parent.to_owned();
+        }
+        if !stem.is_empty() {
+            return stem.to_owned();
+        }
+        return parent.to_owned();
+    }
+    e.path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_owned()
+}
+
 // Silence unused-imports when no test feature picks them up.
 #[allow(dead_code)]
 fn _type_assertions(_: UnitType, _: Scope, _: &dyn Adapter, _: &Path) {}
@@ -366,6 +590,9 @@ pub fn run() {
             scope_roots,
             install_unit,
             uninstall_unit,
+            set_enabled,
+            is_enabled,
+            mv_unit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Rig GUI");
@@ -375,7 +602,16 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
+
+    // Serialize any test that mutates process-global state ($HOME, cwd).
+    // Mirrors the HOME_LOCK pattern in crates/rig-cli/src/main.rs.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn home_guard() -> MutexGuard<'static, ()> {
+        HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     fn setup_home() -> TempDir {
         let tmp = tempfile::tempdir().unwrap();
@@ -385,6 +621,7 @@ mod tests {
 
     #[test]
     fn list_agents_returns_two_first_party() {
+        let _g = home_guard();
         let _h = setup_home();
         let st = AppState::new();
         let agents: Vec<_> = st
@@ -398,6 +635,7 @@ mod tests {
 
     #[test]
     fn list_units_empty_global_home() {
+        let _g = home_guard();
         let _h = setup_home();
         let st = AppState::new();
         let mut all = Vec::new();
@@ -409,6 +647,7 @@ mod tests {
 
     #[test]
     fn read_manifest_missing_returns_empty() {
+        let _g = home_guard();
         let home = setup_home();
         let tmp_proj = tempfile::tempdir().unwrap();
         let dto = read_manifest(
@@ -423,6 +662,7 @@ mod tests {
 
     #[test]
     fn read_lockfile_missing_returns_empty() {
+        let _g = home_guard();
         let _h = setup_home();
         let tmp_proj = tempfile::tempdir().unwrap();
         let dto = read_lockfile(
@@ -436,6 +676,7 @@ mod tests {
 
     #[test]
     fn scope_roots_has_home() {
+        let _g = home_guard();
         let _h = setup_home();
         let roots = scope_roots().unwrap();
         assert!(roots.global_rig.ends_with(".rig"));
@@ -443,8 +684,94 @@ mod tests {
         assert!(roots.codex_global.ends_with(".codex"));
     }
 
+    fn write_skill(root: &Path, name: &str) {
+        let dir = root.join(".claude/skills").join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: test skill\n---\n\n# {name}\nbody\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn set_and_is_enabled_roundtrip_for_skill() {
+        let _g = home_guard();
+        let home = setup_home();
+        write_skill(home.path(), "demo-skill");
+
+        let st = AppState::new();
+        let adapter = st.adapter_by_id("claude").unwrap();
+        let unit_ref = UnitRef::new(UnitType::Skill, "demo-skill".to_owned());
+
+        // Initially enabled.
+        assert!(adapter.is_enabled(&unit_ref, Scope::Global).unwrap());
+
+        // Disable via trait, mirroring the set_enabled command body.
+        adapter
+            .set_enabled(&unit_ref, Scope::Global, false)
+            .unwrap();
+        assert!(!adapter.is_enabled(&unit_ref, Scope::Global).unwrap());
+
+        // Re-enable.
+        adapter.set_enabled(&unit_ref, Scope::Global, true).unwrap();
+        assert!(adapter.is_enabled(&unit_ref, Scope::Global).unwrap());
+    }
+
+    #[test]
+    fn mv_unit_moves_skill_global_to_project_and_preserves_disabled() {
+        let _g = home_guard();
+        let home = setup_home();
+        write_skill(home.path(), "movable");
+
+        let tmp_proj = tempfile::tempdir().unwrap();
+        // ClaudeAdapter resolves project-scope paths via cwd.
+        let prev_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp_proj.path()).unwrap();
+
+        let st = AppState::new();
+        let adapter = st.adapter_by_id("claude").unwrap();
+        let unit_ref = UnitRef::new(UnitType::Skill, "movable".to_owned());
+
+        // Disable at source first.
+        adapter
+            .set_enabled(&unit_ref, Scope::Global, false)
+            .unwrap();
+        assert!(!adapter.is_enabled(&unit_ref, Scope::Global).unwrap());
+
+        let res = mv_unit_inner(
+            &st,
+            Scope::Global,
+            Scope::Project,
+            Some(tmp_proj.path().to_string_lossy().to_string()),
+            "claude".to_owned(),
+            UnitType::Skill,
+            "movable".to_owned(),
+        );
+
+        // Always restore cwd before any assertion that might panic.
+        let res = match res {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = std::env::set_current_dir(&prev_cwd);
+                panic!("mv_unit_inner failed: {e}");
+            }
+        };
+        assert_eq!(res.from_scope, Scope::Global);
+        assert_eq!(res.to_scope, Scope::Project);
+        assert!(res.disabled, "disabled flag must round-trip across mv");
+
+        let src_ok = adapter.read_local(&unit_ref, Scope::Global).is_err();
+        let target_disabled = !adapter.is_enabled(&unit_ref, Scope::Project).unwrap();
+        let _ = std::env::set_current_dir(&prev_cwd);
+
+        assert!(src_ok, "source should be gone");
+        assert!(target_disabled, "disabled state lost across mv");
+    }
+
     #[test]
     fn manifest_roundtrip_via_store() {
+        let _g = home_guard();
         let _h = setup_home();
         let tmp_proj = tempfile::tempdir().unwrap();
         let rig_dir = tmp_proj.path().join(".rig");

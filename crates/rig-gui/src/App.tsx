@@ -155,7 +155,14 @@ export default function App() {
             paths={selected.paths}
             scope={scope}
             drift={selected.drift}
+            disabled={selected.disabled}
             busy={busyUninstall}
+            onChanged={async () => {
+              // After enable/disable/mv, the underlying unit list may
+              // have changed (scope move) or the disabled flag flipped.
+              setSelected(null);
+              await refresh();
+            }}
             onUninstall={async () => {
               if (!confirm(`Uninstall ${selected.unitType}/${selected.name} from ${selected.agent}?`)) return;
               setBusyUninstall(true);

@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **GUI: enable / disable / mv buttons.** Detail pane now exposes
+  toggle for `disable-model-invocation` (skills), rename-trick
+  (rule/command/subagent), snapshot+remove (MCP). "Move to…"
+  dropdown dispatches `rig mv` equivalent. Unit table marks
+  disabled units with a `[disabled]` tag + dimmed row.
 - **`rig mv <type>/<name> --to <scope>`.** Move a unit between scopes
   without losing install metadata. Preserves `install_sha` (same
   bytes = same SHA), lockfile `source`, and disabled state across

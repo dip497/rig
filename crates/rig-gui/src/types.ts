@@ -1,7 +1,7 @@
 // Hand-mirrored DTOs matching crates/rig-gui/src-tauri/src/dto.rs.
 // Keep in sync when Rust side changes.
 
-export type Scope = "global" | "project";
+export type Scope = "global" | "project" | "local";
 
 export type UnitTypeId =
   | "skill"
@@ -70,4 +70,11 @@ export interface InstallResultDto {
   installed: InstalledUnitDto[];
   skipped: string[];
   sourceSha: string;
+}
+
+export interface MvResultDto {
+  fromScope: Scope;
+  toScope: Scope;
+  installSha: string;
+  disabled: boolean;
 }

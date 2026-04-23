@@ -86,6 +86,15 @@ pub struct InstallResultDto {
     pub source_sha: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MvResultDto {
+    pub from_scope: Scope,
+    pub to_scope: Scope,
+    pub install_sha: String,
+    pub disabled: bool,
+}
+
 pub fn unit_type_slug(t: UnitType) -> &'static str {
     match t {
         UnitType::Skill => "skill",

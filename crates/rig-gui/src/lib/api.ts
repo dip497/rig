@@ -6,6 +6,7 @@ import type {
   InstalledUnitDto,
   LockfileDto,
   ManifestDto,
+  MvResultDto,
   Scope,
   ScopeRootsDto,
   UnitBodyDto,
@@ -72,6 +73,55 @@ export const uninstallUnit = (
 ) =>
   invoke<void>("uninstall_unit", {
     scope,
+    projectPath,
+    agent,
+    unitType,
+    name,
+  });
+
+export const setEnabled = (
+  scope: Scope,
+  agent: string,
+  unitType: UnitTypeId,
+  name: string,
+  enabled: boolean,
+  projectPath?: string,
+) =>
+  invoke<void>("set_enabled", {
+    scope,
+    projectPath,
+    agent,
+    unitType,
+    name,
+    enabled,
+  });
+
+export const isEnabled = (
+  scope: Scope,
+  agent: string,
+  unitType: UnitTypeId,
+  name: string,
+  projectPath?: string,
+) =>
+  invoke<boolean>("is_enabled", {
+    scope,
+    projectPath,
+    agent,
+    unitType,
+    name,
+  });
+
+export const mvUnit = (
+  fromScope: Scope,
+  toScope: Scope,
+  agent: string,
+  unitType: UnitTypeId,
+  name: string,
+  projectPath?: string,
+) =>
+  invoke<MvResultDto>("mv_unit", {
+    fromScope,
+    toScope,
     projectPath,
     agent,
     unitType,

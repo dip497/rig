@@ -48,15 +48,15 @@ export default function UnitTable({
                 onClick={() => onSelect(r)}
                 className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${
                   selectedKey === k ? "bg-indigo-50" : ""
-                }`}
+                } ${r.disabled ? "opacity-60" : ""}`}
               >
                 <td className="px-3 py-2 font-mono text-xs">{r.agent}</td>
                 <td className="px-3 py-2 font-mono text-xs">{r.unitType}</td>
                 <td className="px-3 py-2 font-medium">
                   {r.name}
                   {r.disabled ? (
-                    <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800">
-                      disabled
+                    <span className="ml-2 rounded bg-slate-100 px-1 text-xs text-slate-500">
+                      [disabled]
                     </span>
                   ) : null}
                 </td>
