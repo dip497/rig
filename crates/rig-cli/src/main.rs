@@ -143,8 +143,15 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CliScope::Project)]
         scope: CliScope,
     },
-    /// Audit: duplicates across agents, broken symlinks.
-    Doctor,
+    /// Audit: duplicates across agents, broken symlinks, and `rig mv`
+    /// reconciliation (split-state / stale-lock-entry).
+    Doctor {
+        /// Auto-resolve fixable inconsistencies (currently: drop stale
+        /// lock entries from crashed `rig mv` runs). Split-state is
+        /// reported only since user intent is ambiguous.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Soft-disable an installed unit. Drift stays `Clean`; lockfile
     /// is not mutated. See `docs/ENABLE-DISABLE-MV.md`.
     Disable {
@@ -163,6 +170,19 @@ enum Command {
         agent: Option<Vec<CliAgent>>,
         #[arg(long, value_enum)]
         scope: Option<CliScope>,
+    },
+    /// Move an installed unit between scopes. Preserves `install_sha`
+    /// and the disabled state. Non-atomic by design — `rig doctor`
+    /// reconciles crash windows. See `docs/ENABLE-DISABLE-MV.md` §8.
+    Mv {
+        target: String,
+        /// Target scope to move into.
+        #[arg(long = "to", value_enum)]
+        to: CliScope,
+        /// Agent(s) to move. Comma-separated. If omitted, every agent
+        /// that currently has the unit installed.
+        #[arg(long, value_delimiter = ',')]
+        agent: Option<Vec<CliAgent>>,
     },
 }
 
@@ -205,7 +225,7 @@ impl CliScopeAll {
     }
 }
 
-#[derive(Copy, Clone, ValueEnum, PartialEq, Eq)]
+#[derive(Copy, Clone, ValueEnum, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum CliAgent {
     Claude,
     Codex,
@@ -308,7 +328,7 @@ fn main() -> Result<()> {
             agent,
             scope,
         } => unlink(&target, agent.as_deref(), scope.into()),
-        Command::Doctor => doctor(),
+        Command::Doctor { fix } => doctor(fix),
         Command::Disable {
             target,
             agent,
@@ -319,6 +339,7 @@ fn main() -> Result<()> {
             agent,
             scope,
         } => toggle(&target, agent.as_deref(), scope, true),
+        Command::Mv { target, to, agent } => mv(&target, to.into(), agent.as_deref()),
     }
 }
 
@@ -1568,10 +1589,10 @@ fn human_bytes(n: u64) -> String {
 
 // ---------- New: doctor ----------
 
-fn doctor() -> Result<()> {
+fn doctor(fix: bool) -> Result<()> {
     use std::collections::HashMap;
 
-    let all = collect_all(&[CoreScope::Global, CoreScope::Project])?;
+    let all = collect_all(&[CoreScope::Global, CoreScope::Project, CoreScope::Local])?;
 
     // Duplicates: same (unit_type, name) seen on 2+ agents (any scope).
     type DupEntry = (String, CoreScope, PathBuf);
@@ -1668,14 +1689,172 @@ fn doctor() -> Result<()> {
         }
     }
 
-    if dup_count == 0 && broken_count == 0 && broken_link_count == 0 {
+    // ----- Mv reconciliation (spec ENABLE-DISABLE-MV.md §8 / §12) -----
+    //
+    // Build a map of `(agent, unit_type, name) -> set<scope>` for both
+    // (a) what the adapters see on disk, and (b) what the lockfiles
+    // claim. Any mismatch is either split-state or stale-lock-entry.
+    type Triple = (String, UnitType, String);
+    let mut disk_scopes: HashMap<Triple, std::collections::HashSet<CoreScope>> = HashMap::new();
+    for (agent, sc, u) in &all {
+        disk_scopes
+            .entry((
+                agent.as_str().to_owned(),
+                u.unit_ref.unit_type,
+                u.unit_ref.name.clone(),
+            ))
+            .or_default()
+            .insert(*sc);
+    }
+
+    // Collect lockfile claims per scope, keyed by (agent, type, name).
+    let mut lock_scopes: HashMap<Triple, std::collections::HashSet<CoreScope>> = HashMap::new();
+    for sc in [CoreScope::Global, CoreScope::Project, CoreScope::Local] {
+        let Ok(lock) = store::load_lockfile(sc) else {
+            continue;
+        };
+        for e in &lock.entries {
+            if e.scope != sc {
+                continue;
+            }
+            let name = lock_entry_name(e);
+            lock_scopes
+                .entry((e.agent.as_str().to_owned(), e.unit_type, name))
+                .or_default()
+                .insert(sc);
+        }
+    }
+
+    let mut split_count = 0;
+    let mut stale_count = 0;
+    let mut mv_header_printed = false;
+
+    // Walk the union of keys to find all inconsistencies.
+    let mut all_keys: std::collections::BTreeSet<Triple> = std::collections::BTreeSet::new();
+    for k in disk_scopes.keys() {
+        all_keys.insert(k.clone());
+    }
+    for k in lock_scopes.keys() {
+        all_keys.insert(k.clone());
+    }
+
+    for key in &all_keys {
+        let disk = disk_scopes.get(key).cloned().unwrap_or_default();
+        let lock = lock_scopes.get(key).cloned().unwrap_or_default();
+        if disk == lock {
+            continue;
+        }
+        // Split-state: disk has scopes that lock doesn't.
+        let only_disk: Vec<_> = disk.difference(&lock).copied().collect();
+        // Stale lock: lock has scopes that disk doesn't.
+        let only_lock: Vec<_> = lock.difference(&disk).copied().collect();
+
+        if !only_disk.is_empty() {
+            if !mv_header_printed {
+                println!("Mv reconciliation:");
+                mv_header_printed = true;
+            }
+            split_count += 1;
+            println!(
+                "  split-state: [{}] {}/{} present on disk in {} but lockfile only covers {}",
+                key.0,
+                type_slug(key.1),
+                key.2,
+                format_scope_set(&only_disk),
+                if lock.is_empty() {
+                    "<none>".to_owned()
+                } else {
+                    format_scope_set(&lock.iter().copied().collect::<Vec<_>>())
+                },
+            );
+            println!(
+                "    fix: re-run `rig mv {}/{} --to <scope>` or manually remove from the stale scope",
+                type_slug(key.1),
+                key.2,
+            );
+        }
+
+        if !only_lock.is_empty() {
+            if !mv_header_printed {
+                println!("Mv reconciliation:");
+                mv_header_printed = true;
+            }
+            stale_count += 1;
+            println!(
+                "  stale-lock-entry: [{}] {}/{} lockfile in {} but not installed there",
+                key.0,
+                type_slug(key.1),
+                key.2,
+                format_scope_set(&only_lock),
+            );
+            if fix {
+                for sc in &only_lock {
+                    let Ok(mut l) = store::load_lockfile(*sc) else {
+                        continue;
+                    };
+                    let before = l.entries.len();
+                    l.entries.retain(|e| {
+                        !(e.agent.as_str() == key.0
+                            && e.unit_type == key.1
+                            && lock_entry_name(e) == key.2
+                            && e.scope == *sc)
+                    });
+                    if l.entries.len() != before {
+                        store::save_lockfile(*sc, &l).ok();
+                        println!("    fixed: dropped stale entry from {} lockfile", sc);
+                    }
+                }
+            } else {
+                println!("    fix: re-run `rig doctor --fix` to drop the stale entry");
+            }
+        }
+    }
+
+    if dup_count == 0
+        && broken_count == 0
+        && broken_link_count == 0
+        && split_count == 0
+        && stale_count == 0
+    {
         println!("all clean");
     } else {
         println!(
-            "{dup_count} duplicates, {broken_count} broken symlinks, {broken_link_count} broken links"
+            "{dup_count} duplicates, {broken_count} broken symlinks, {broken_link_count} broken links, {split_count} split-state, {stale_count} stale lock entries"
         );
     }
     Ok(())
+}
+
+/// Best-effort extraction of the canonical unit name from a LockEntry.
+/// Prefers `native_name` (set for MCP), falls back to the path stem,
+/// then to the trailing segment of `id`.
+fn lock_entry_name(e: &LockEntry) -> String {
+    if let Some(n) = &e.native_name {
+        return n.clone();
+    }
+    if let Some(stem) = e.path.file_stem().and_then(|s| s.to_str()) {
+        // Skill installs use a directory-per-skill layout, so the
+        // file stem is often `SKILL`. In that case prefer the
+        // parent directory name.
+        if stem == "SKILL" {
+            if let Some(parent) = e.path.parent().and_then(|p| p.file_name()) {
+                if let Some(s) = parent.to_str() {
+                    return s.to_owned();
+                }
+            }
+        }
+        return stem.to_owned();
+    }
+    e.id.rsplit_once('/')
+        .map(|(_, n)| n.to_owned())
+        .unwrap_or_else(|| e.id.clone())
+}
+
+fn format_scope_set(scopes: &[CoreScope]) -> String {
+    let mut v: Vec<&'static str> = scopes.iter().copied().map(scope_slug).collect();
+    v.sort_unstable();
+    v.dedup();
+    v.join("+")
 }
 
 // ---------- Shared helpers ----------
@@ -1902,6 +2081,264 @@ fn toggle(
     if io_failure {
         std::process::exit(24);
     }
+    Ok(())
+}
+
+/// Move an installed unit between scopes. Ordered best-effort per
+/// `docs/ENABLE-DISABLE-MV.md` §8 — no two-phase commit. Crash windows
+/// are surfaced by `rig doctor`.
+fn mv(target: &str, to: CoreScope, agents: Option<&[CliAgent]>) -> Result<()> {
+    let (ty_slug, name) = target
+        .split_once('/')
+        .with_context(|| format!("target must be `<type>/<name>`, got `{target}`"))?;
+    let unit_type = parse_type(ty_slug)?;
+
+    // Find every (agent, scope) the unit is installed in. Restrict to
+    // agents the user specified, if any.
+    let all = collect_all(&[CoreScope::Global, CoreScope::Project, CoreScope::Local])?;
+    let filter_agents: Option<Vec<CliAgent>> = agents.map(<[CliAgent]>::to_vec);
+
+    // For each agent that has the unit installed, collect its current
+    // scope. (Per spec: mv is per (agent, unit) pair; we refuse if an
+    // agent has the unit in multiple scopes — user must disambiguate.)
+    let mut per_agent: std::collections::BTreeMap<CliAgent, Vec<CoreScope>> =
+        std::collections::BTreeMap::new(); // CliAgent is Ord
+    for (agent_id, sc, u) in &all {
+        if u.unit_ref.unit_type != unit_type || u.unit_ref.name != name {
+            continue;
+        }
+        let ag = match agent_id.as_str() {
+            s if s == rig_adapter_claude::AGENT_ID => CliAgent::Claude,
+            s if s == rig_adapter_codex::AGENT_ID => CliAgent::Codex,
+            _ => continue,
+        };
+        if let Some(wanted) = &filter_agents {
+            if !wanted.contains(&ag) {
+                continue;
+            }
+        }
+        per_agent.entry(ag).or_default().push(*sc);
+    }
+
+    if per_agent.is_empty() {
+        eprintln!("{target} is not installed in any scope");
+        std::process::exit(30);
+    }
+
+    // Pre-flight pass: refuse if target scope already has a
+    // conflicting (type, name) for any agent we'd touch, and refuse
+    // when a single agent has it in multiple scopes (ambiguous).
+    for (ag, scopes) in &per_agent {
+        let distinct: std::collections::HashSet<CoreScope> = scopes.iter().copied().collect();
+        if distinct.contains(&to) && distinct.len() == 1 {
+            // Already at target — treated as noop later, not a conflict.
+            continue;
+        }
+        if distinct.contains(&to) {
+            eprintln!(
+                "{target}: {} already has the unit at target scope {to}; cannot move",
+                ag.id(),
+            );
+            std::process::exit(31);
+        }
+        if distinct.len() > 1 {
+            eprintln!(
+                "{target}: {} has the unit installed in {:?}; --from flag (reserved) required to disambiguate",
+                ag.id(),
+                distinct.iter().map(|s| scope_slug(*s)).collect::<Vec<_>>(),
+            );
+            std::process::exit(32);
+        }
+    }
+
+    let unit_ref = UnitRef::new(unit_type, name.to_owned());
+    let mut any_moved = false;
+    let mut any_failed = false;
+    let mut any_noop = false;
+
+    for (ag, scopes) in &per_agent {
+        let from: CoreScope = scopes[0];
+
+        // Noop: already at target.
+        if from == to {
+            println!("{target} [{}] already at {to}", ag.id());
+            any_noop = true;
+            continue;
+        }
+
+        let adapter = ag.adapter();
+        if !adapter.capabilities().contains(&unit_type) {
+            eprintln!("  {}  {from}→{to}  [unsupported unit type]", ag.id());
+            any_failed = true;
+            continue;
+        }
+
+        // Pre-fetch the source lockfile entry so we can carry
+        // `source` / `source_sha` forward.
+        let src_lock = match store::load_lockfile(from) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("  {}  {from}→{to}  [lockfile read failed: {e}]", ag.id());
+                any_failed = true;
+                continue;
+            }
+        };
+        let src_entry = src_lock
+            .entries
+            .iter()
+            .find(|e| {
+                e.unit_type == unit_type
+                    && e.agent.as_str() == ag.id()
+                    && e.scope == from
+                    && lock_entry_name(e) == name
+            })
+            .cloned();
+
+        // Read the unit back via the adapter, then install into target.
+        let unit = match adapter.read_local(&unit_ref, from) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!("  {}  {from}→{to}  [read_local failed: {e}]", ag.id());
+                any_failed = true;
+                continue;
+            }
+        };
+
+        // Preserve the "disabled" state across the move. If the
+        // source unit is disabled, we need to toggle after install
+        // (install always writes the enabled form).
+        let was_disabled = adapter
+            .is_enabled(&unit_ref, from)
+            .map(|e| !e)
+            .unwrap_or(false);
+
+        // Step 2: write target.
+        let receipt = match adapter.install(&unit, to) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("  {}  {from}→{to}  [install failed: {e}]", ag.id());
+                any_failed = true;
+                continue;
+            }
+        };
+
+        // Step 3: commit target lockfile.
+        let id = src_entry
+            .as_ref()
+            .map(|e| e.id.clone())
+            .unwrap_or_else(|| format!("{}/{}", type_slug(unit_type), name));
+        let source = src_entry
+            .as_ref()
+            .map(|e| e.source.clone())
+            .unwrap_or_else(|| Source::Local {
+                path: name.to_owned(),
+            });
+        let source_sha = src_entry
+            .as_ref()
+            .map(|e| e.source_sha.clone())
+            .unwrap_or_else(|| receipt.install_sha.clone());
+        let native_name = if unit_type == UnitType::Mcp {
+            Some(receipt.unit_ref.name.clone())
+        } else {
+            None
+        };
+        let extra = src_entry
+            .as_ref()
+            .map(|e| e.extra.clone())
+            .unwrap_or_default();
+
+        let mut target_lock = match store::load_lockfile(to) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "  {}  {from}→{to}  [target lockfile read failed: {e}]",
+                    ag.id()
+                );
+                any_failed = true;
+                continue;
+            }
+        };
+        target_lock
+            .entries
+            .retain(|e| !(e.id == id && e.agent == receipt.agent && e.scope == to));
+        target_lock.entries.push(LockEntry {
+            id: id.clone(),
+            unit_type,
+            source,
+            source_sha,
+            install_sha: receipt.install_sha.clone(),
+            agent: receipt.agent.clone(),
+            scope: to,
+            path: receipt.paths.first().cloned().unwrap_or_default(),
+            native_name,
+            extra,
+        });
+        if let Err(e) = store::save_lockfile(to, &target_lock) {
+            eprintln!(
+                "  {}  {from}→{to}  [target lockfile write failed: {e}]",
+                ag.id()
+            );
+            any_failed = true;
+            continue;
+        }
+
+        // Re-apply disabled state at target, if applicable.
+        if was_disabled {
+            if let Err(e) = adapter.set_enabled(&unit_ref, to, false) {
+                eprintln!(
+                    "  {}  {from}→{to}  [warning: could not re-disable at target: {e}]",
+                    ag.id()
+                );
+            }
+        }
+
+        // --- crash window between step 3 and 4 ---
+
+        // Step 4: remove source bytes.
+        if let Err(e) = adapter.uninstall(&unit_ref, from) {
+            eprintln!(
+                "  {}  {from}→{to}  [source uninstall failed: {e}; run `rig doctor` to reconcile]",
+                ag.id()
+            );
+            any_failed = true;
+            continue;
+        }
+
+        // --- crash window between step 4 and 5 ---
+
+        // Step 5: drop source lockfile entry.
+        let mut src_lock_mut = src_lock;
+        src_lock_mut
+            .entries
+            .retain(|e| !(e.id == id && e.agent.as_str() == ag.id() && e.scope == from));
+        if let Err(e) = store::save_lockfile(from, &src_lock_mut) {
+            eprintln!(
+                "  {}  {from}→{to}  [source lockfile write failed: {e}; run `rig doctor --fix`]",
+                ag.id()
+            );
+            any_failed = true;
+            continue;
+        }
+
+        println!(
+            "moved {target} [{}] {from} -> {to}  install_sha={}",
+            ag.id(),
+            receipt.install_sha
+        );
+        any_moved = true;
+    }
+
+    // Exit-code policy (spec §8):
+    //  0  all moved (or noop), no failures
+    //  33 partial failure: some moved, others failed
+    //  34 no moves happened and we hit an I/O failure
+    if any_failed && any_moved {
+        std::process::exit(33);
+    }
+    if any_failed && !any_moved {
+        std::process::exit(34);
+    }
+    let _ = any_noop;
     Ok(())
 }
 
@@ -2189,6 +2626,255 @@ mod tests {
                 OnDrift::Cancel,
             );
             assert!(res.is_err());
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ---------- mv wedge tests (ENABLE-DISABLE-MV.md §§8, 10-12) ----------
+
+    fn sample_skill(name: &str) -> Unit {
+        Unit::Skill(rig_core::unit::Skill {
+            name: name.into(),
+            description: "sample".into(),
+            extra_frontmatter: Default::default(),
+            body: format!("body for {name}\n"),
+            resources: Vec::new(),
+        })
+    }
+
+    /// Seed a lockfile entry for `(unit_type, name, agent, scope)`
+    /// using the receipt that `adapter.install` returned. Mirrors
+    /// `upsert_lock` but without pulling in a full Source; we use a
+    /// `Source::Local` stand-in so the test is hermetic.
+    fn seed_lock(scope: CoreScope, receipt: &Receipt, unit_type: UnitType) {
+        let name = receipt.unit_ref.name.clone();
+        let source = Source::Local { path: name.clone() };
+        let id = format!("{}/{}", type_slug(unit_type), source);
+        let mut lock = store::load_lockfile(scope).unwrap();
+        lock.entries.push(LockEntry {
+            id,
+            unit_type,
+            source,
+            source_sha: receipt.install_sha.clone(),
+            install_sha: receipt.install_sha.clone(),
+            agent: receipt.agent.clone(),
+            scope,
+            path: receipt.paths.first().cloned().unwrap_or_default(),
+            native_name: if unit_type == UnitType::Mcp {
+                Some(name)
+            } else {
+                None
+            },
+            extra: Default::default(),
+        });
+        store::save_lockfile(scope, &lock).unwrap();
+    }
+
+    /// Skill mv roundtrip: install global, move to project, assert
+    /// install_sha preserved, lockfile flipped, only one scope has
+    /// the unit on disk.
+    #[test]
+    fn mv_skill_global_to_project() {
+        let tmp = tempdir("mv-skill");
+        let home = tmp.join("home");
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        with_home(&home, || {
+            let prev_cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&proj).unwrap();
+
+            let adapter = ClaudeAdapter::new();
+            let r = adapter
+                .install(&sample_skill("mv-me"), CoreScope::Global)
+                .unwrap();
+            seed_lock(CoreScope::Global, &r, UnitType::Skill);
+            let original_sha = r.install_sha.clone();
+
+            mv("skill/mv-me", CoreScope::Project, Some(&[CliAgent::Claude])).unwrap();
+
+            // Disk: source gone, target populated.
+            let global_list = adapter.list(CoreScope::Global).unwrap();
+            let project_list = adapter.list(CoreScope::Project).unwrap();
+            assert!(!global_list.iter().any(|u| u.unit_ref.name == "mv-me"));
+            assert!(project_list.iter().any(|u| u.unit_ref.name == "mv-me"));
+
+            // Lockfile: source entry dropped, target entry has same install_sha.
+            let glock = store::load_lockfile(CoreScope::Global).unwrap();
+            let plock = store::load_lockfile(CoreScope::Project).unwrap();
+            assert!(
+                !glock
+                    .entries
+                    .iter()
+                    .any(|e| e.unit_type == UnitType::Skill && lock_entry_name(e) == "mv-me"),
+                "source lock entry not dropped"
+            );
+            let target = plock
+                .entries
+                .iter()
+                .find(|e| e.unit_type == UnitType::Skill && lock_entry_name(e) == "mv-me")
+                .expect("target lock entry missing");
+            assert_eq!(
+                target.install_sha, original_sha,
+                "install_sha not preserved across mv"
+            );
+
+            std::env::set_current_dir(prev_cwd).ok();
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Already-at-target mv is a noop (prints and exits Ok).
+    #[test]
+    fn mv_already_at_target_noop() {
+        let tmp = tempdir("mv-noop");
+        let home = tmp.join("home");
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        with_home(&home, || {
+            let prev_cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&proj).unwrap();
+
+            let adapter = ClaudeAdapter::new();
+            let r = adapter
+                .install(&sample_skill("stayput"), CoreScope::Global)
+                .unwrap();
+            seed_lock(CoreScope::Global, &r, UnitType::Skill);
+
+            // Target = Global (already there). Must not fail.
+            mv(
+                "skill/stayput",
+                CoreScope::Global,
+                Some(&[CliAgent::Claude]),
+            )
+            .unwrap();
+
+            // Disk unchanged.
+            let global_list = adapter.list(CoreScope::Global).unwrap();
+            assert!(global_list.iter().any(|u| u.unit_ref.name == "stayput"));
+
+            std::env::set_current_dir(prev_cwd).ok();
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Disabled unit: after mv, the unit is still disabled at target.
+    #[test]
+    fn mv_preserves_disabled_state() {
+        let tmp = tempdir("mv-disabled");
+        let home = tmp.join("home");
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        with_home(&home, || {
+            let prev_cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&proj).unwrap();
+
+            let adapter = ClaudeAdapter::new();
+            let unit_ref = UnitRef::new(UnitType::Rule, "r".to_owned());
+            let r = adapter.install(&sample_rule(), CoreScope::Global).unwrap();
+            seed_lock(CoreScope::Global, &r, UnitType::Rule);
+            adapter
+                .set_enabled(&unit_ref, CoreScope::Global, false)
+                .unwrap();
+            assert!(!adapter.is_enabled(&unit_ref, CoreScope::Global).unwrap());
+
+            mv("rule/r", CoreScope::Project, Some(&[CliAgent::Claude])).unwrap();
+
+            // Target must report disabled.
+            let is_enabled_target = adapter
+                .is_enabled(&unit_ref, CoreScope::Project)
+                .unwrap_or(true);
+            assert!(!is_enabled_target, "disabled state lost across mv");
+
+            std::env::set_current_dir(prev_cwd).ok();
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Doctor --fix drops a stale lockfile entry (simulated crash
+    /// between steps 4 and 5 of mv: unit bytes moved, but source
+    /// lockfile still has the entry).
+    #[test]
+    fn doctor_fix_drops_stale_lock_entry() {
+        let tmp = tempdir("doc-stale");
+        let home = tmp.join("home");
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        with_home(&home, || {
+            let prev_cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&proj).unwrap();
+
+            let adapter = ClaudeAdapter::new();
+            let r = adapter
+                .install(&sample_skill("orphan"), CoreScope::Project)
+                .unwrap();
+            // Seed lockfile entry claiming the unit lives in GLOBAL,
+            // even though it's only on disk in PROJECT. This is
+            // precisely the "stale lock entry" crash state.
+            let mut r_for_lock = r.clone();
+            r_for_lock.scope = CoreScope::Global;
+            seed_lock(CoreScope::Global, &r_for_lock, UnitType::Skill);
+            // Also seed the real project entry so doctor doesn't
+            // complain about the *project* side being split.
+            seed_lock(CoreScope::Project, &r, UnitType::Skill);
+
+            // Pre-fix: global lockfile has an entry.
+            let g_before = store::load_lockfile(CoreScope::Global).unwrap();
+            assert_eq!(g_before.entries.len(), 1);
+
+            doctor(true).unwrap();
+
+            // Post-fix: stale entry dropped.
+            let g_after = store::load_lockfile(CoreScope::Global).unwrap();
+            assert!(
+                g_after.entries.is_empty(),
+                "doctor --fix should have dropped the stale entry"
+            );
+
+            std::env::set_current_dir(prev_cwd).ok();
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Doctor without --fix does NOT auto-resolve split state (unit
+    /// present on disk in two scopes while lockfile only claims one).
+    #[test]
+    fn doctor_reports_but_does_not_fix_split_state() {
+        let tmp = tempdir("doc-split");
+        let home = tmp.join("home");
+        let proj = tmp.join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        with_home(&home, || {
+            let prev_cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&proj).unwrap();
+
+            let adapter = ClaudeAdapter::new();
+            // Install into both global and project.
+            let r_g = adapter
+                .install(&sample_skill("twin"), CoreScope::Global)
+                .unwrap();
+            let _r_p = adapter
+                .install(&sample_skill("twin"), CoreScope::Project)
+                .unwrap();
+            // Lockfile only covers GLOBAL → the PROJECT copy is the
+            // "split-state" tail of a crashed mv (target written,
+            // source not yet uninstalled — but only mirrored in lock).
+            seed_lock(CoreScope::Global, &r_g, UnitType::Skill);
+
+            doctor(true).unwrap();
+
+            // Even with --fix, both on-disk copies should survive
+            // (split state is report-only).
+            let global_list = adapter.list(CoreScope::Global).unwrap();
+            let project_list = adapter.list(CoreScope::Project).unwrap();
+            assert!(global_list.iter().any(|u| u.unit_ref.name == "twin"));
+            assert!(project_list.iter().any(|u| u.unit_ref.name == "twin"));
+
+            std::env::set_current_dir(prev_cwd).ok();
         });
         std::fs::remove_dir_all(&tmp).ok();
     }

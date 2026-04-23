@@ -9,6 +9,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **`rig mv <type>/<name> --to <scope>`.** Move a unit between scopes
+  without losing install metadata. Preserves `install_sha` (same
+  bytes = same SHA), lockfile `source`, and disabled state across
+  the move. Non-atomic by design (spec: ordered best-effort, crash
+  windows reconciled by `rig doctor`). See `docs/ENABLE-DISABLE-MV.md`
+  §8.
+- **`rig doctor` mv reconciliation.** Detects split-state (unit in
+  both scopes, lockfile only has target) and stale-lock-entry
+  (unit in target only, lockfile still has source) from crashed
+  `rig mv` runs. `--fix` auto-drops stale entries; split-state is
+  reported-only since user intent can't be inferred.
 - **`rig enable` / `rig disable`.** Toggle any installed unit on/off
   without uninstalling. Uses Claude's native frontmatter flag for
   skills (`disable-model-invocation: true`); file-rename trick for
