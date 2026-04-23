@@ -15,7 +15,8 @@
 #![forbid(unsafe_code)]
 
 mod command;
-mod frontmatter;
+pub mod disabled;
+pub mod frontmatter;
 pub mod mcp;
 mod rule;
 mod skill;
@@ -74,12 +75,28 @@ fn type_root(scope: Scope, unit_type: UnitType) -> AdapterResult<PathBuf> {
 
 /// Where the primary file of a unit lives on disk. For skills it's a
 /// directory; for everything else it's a single `.md` file.
-fn primary_path(scope: Scope, unit_type: UnitType, name: &str) -> AdapterResult<PathBuf> {
+pub(crate) fn primary_path(
+    scope: Scope,
+    unit_type: UnitType,
+    name: &str,
+) -> AdapterResult<PathBuf> {
     let root = type_root(scope, unit_type)?;
     Ok(match unit_type {
         UnitType::Skill => root.join(name),
         _ => root.join(format!("{name}.md")),
     })
+}
+
+/// Directory where Rig stores MCP disable snapshots for this scope.
+/// `<scope>/.rig/disabled/mcp/`.
+fn disabled_mcp_dir(scope: Scope) -> AdapterResult<PathBuf> {
+    let base = match scope {
+        Scope::Global => rig_fs::home_dir()
+            .map(|h| h.join(".rig"))
+            .map_err(to_other)?,
+        Scope::Project | Scope::Local => PathBuf::from(".rig"),
+    };
+    Ok(base.join("disabled").join("mcp"))
 }
 
 pub struct ClaudeAdapter;
@@ -182,6 +199,10 @@ impl Adapter for ClaudeAdapter {
     fn uninstall(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<()> {
         if unit_ref.unit_type == UnitType::Mcp {
             mcp::validate_scope(UnitType::Mcp, scope)?;
+            // Clean up any disable snapshot too.
+            if let Ok(snap) = disabled::mcp_snapshot_path(scope, &unit_ref.name) {
+                let _ = std::fs::remove_file(&snap);
+            }
             return mcp::uninstall(&unit_ref.name, scope);
         }
         mcp::validate_scope(unit_ref.unit_type, scope)?;
@@ -197,6 +218,9 @@ impl Adapter for ClaudeAdapter {
             }
             _ => {
                 rig_fs::remove_if_exists(&p).map_err(to_other)?;
+                // Also remove any disabled twin.
+                let d = disabled::add_suffix(&p);
+                rig_fs::remove_if_exists(&d).map_err(to_other)?;
             }
         }
         Ok(())
@@ -216,7 +240,29 @@ impl Adapter for ClaudeAdapter {
                         unit_ref: UnitRef::new(UnitType::Mcp, m.name),
                         scope,
                         paths: vec![cfg.clone()],
+                        disabled: false,
                     });
+                }
+            }
+            // Disabled MCP entries live under `<scope>/.rig/disabled/mcp/`
+            // as snapshot files; surface them too.
+            if let Ok(dir) = disabled_mcp_dir(scope) {
+                if dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        for e in entries.flatten() {
+                            let name_os = e.file_name();
+                            let file_name = name_os.to_string_lossy();
+                            // We own <name>.claude.json.
+                            if let Some(stem) = file_name.strip_suffix(".claude.json") {
+                                out.push(InstalledUnit {
+                                    unit_ref: UnitRef::new(UnitType::Mcp, stem.to_owned()),
+                                    scope,
+                                    paths: vec![e.path()],
+                                    disabled: true,
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -258,10 +304,12 @@ impl Adapter for ClaudeAdapter {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().into_owned();
+                        let disabled = disabled::skill_is_disabled(&p).unwrap_or(false);
                         out.push(InstalledUnit {
                             unit_ref: UnitRef::new(ty, name),
                             scope,
                             paths: collect_files(&p).unwrap_or_else(|_| vec![skill_md]),
+                            disabled,
                         });
                     }
                     _ => {
@@ -269,13 +317,21 @@ impl Adapter for ClaudeAdapter {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().into_owned();
-                        let Some(stem) = name.strip_suffix(".md") else {
-                            continue;
-                        };
+                        // Handle both `<stem>.md` and
+                        // `<stem>.md.rig-disabled` entries.
+                        let (stem, is_disabled) =
+                            if let Some(stem) = name.strip_suffix(".md.rig-disabled") {
+                                (stem.to_owned(), true)
+                            } else if let Some(stem) = name.strip_suffix(".md") {
+                                (stem.to_owned(), false)
+                            } else {
+                                continue;
+                            };
                         out.push(InstalledUnit {
-                            unit_ref: UnitRef::new(ty, stem.to_owned()),
+                            unit_ref: UnitRef::new(ty, stem),
                             scope,
                             paths: vec![p],
+                            disabled: is_disabled,
                         });
                     }
                 }
@@ -313,10 +369,17 @@ impl Adapter for ClaudeAdapter {
                 NativeLayout { files: out }
             }
             _ => {
-                if !primary.exists() {
+                // Follow the `.rig-disabled` rename suffix so
+                // `read_local` works for disabled units.
+                let disabled_p = disabled::add_suffix(&primary);
+                let read_path = if primary.exists() {
+                    primary.clone()
+                } else if disabled_p.exists() {
+                    disabled_p
+                } else {
                     return Err(AdapterError::NotFound(unit_ref.name.clone(), scope));
-                }
-                let bytes = rig_fs::read(&primary).map_err(to_other)?;
+                };
+                let bytes = rig_fs::read(&read_path).map_err(to_other)?;
                 NativeLayout {
                     files: vec![NativeFile {
                         relative_path: primary.file_name().unwrap().to_string_lossy().into_owned(),
@@ -327,6 +390,55 @@ impl Adapter for ClaudeAdapter {
         };
 
         from_native(unit_ref.unit_type, &native)
+    }
+
+    fn set_enabled(&self, unit_ref: &UnitRef, scope: Scope, enabled: bool) -> AdapterResult<()> {
+        match unit_ref.unit_type {
+            UnitType::Skill => {
+                mcp::validate_scope(unit_ref.unit_type, scope)?;
+                let dir = primary_path(scope, UnitType::Skill, &unit_ref.name)?;
+                if !dir.join(skill::SKILL_FILE).exists() {
+                    return Err(AdapterError::NotFound(unit_ref.name.clone(), scope));
+                }
+                disabled::set_skill_disabled(&dir, enabled, &disabled::now_iso8601())
+            }
+            UnitType::Rule | UnitType::Command | UnitType::Subagent => {
+                mcp::validate_scope(unit_ref.unit_type, scope)?;
+                disabled::set_file_disabled(scope, unit_ref.unit_type, &unit_ref.name, enabled)
+            }
+            UnitType::Mcp => {
+                mcp::validate_scope(UnitType::Mcp, scope)?;
+                if enabled {
+                    disabled::enable_mcp(&unit_ref.name, scope)
+                } else {
+                    disabled::disable_mcp(&unit_ref.name, scope)
+                }
+            }
+            UnitType::Hook | UnitType::Plugin => Err(AdapterError::UnsupportedOp("enable/disable")),
+        }
+    }
+
+    fn is_enabled(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<bool> {
+        match unit_ref.unit_type {
+            UnitType::Skill => {
+                mcp::validate_scope(unit_ref.unit_type, scope)?;
+                let dir = primary_path(scope, UnitType::Skill, &unit_ref.name)?;
+                Ok(!disabled::skill_is_disabled(&dir)?)
+            }
+            UnitType::Rule | UnitType::Command | UnitType::Subagent => {
+                mcp::validate_scope(unit_ref.unit_type, scope)?;
+                Ok(!disabled::file_is_disabled(
+                    scope,
+                    unit_ref.unit_type,
+                    &unit_ref.name,
+                )?)
+            }
+            UnitType::Mcp => {
+                mcp::validate_scope(UnitType::Mcp, scope)?;
+                Ok(!disabled::mcp_is_disabled(scope, &unit_ref.name)?)
+            }
+            UnitType::Hook | UnitType::Plugin => Err(AdapterError::UnsupportedOp("enable/disable")),
+        }
     }
 
     fn detect_drift(
@@ -364,24 +476,49 @@ impl Adapter for ClaudeAdapter {
                         let rel = p.strip_prefix(&primary).unwrap_or(&p).to_string_lossy();
                         bytes.extend_from_slice(rel.as_bytes());
                         bytes.push(0);
-                        bytes.extend_from_slice(&rig_fs::read(&p).map_err(to_other)?);
+                        let raw = rig_fs::read(&p).map_err(to_other)?;
+                        // Normalise SKILL.md to strip Rig's own
+                        // disable flip so a disabled skill stays Clean.
+                        let normalised =
+                            if p.file_name().and_then(|s| s.to_str()) == Some(skill::SKILL_FILE) {
+                                disabled::normalise_skill_md(&raw)
+                            } else {
+                                raw
+                            };
+                        bytes.extend_from_slice(&normalised);
                         bytes.push(0);
                     }
                     Some(Sha256::of(&bytes))
                 }
             }
             _ => {
-                if !primary.exists() {
-                    None
+                // Follow the `.rig-disabled` rename suffix if present —
+                // the unit's canonical filename (pre-disable) is what
+                // the install_sha was computed against.
+                let disabled_path = disabled::add_suffix(&primary);
+                let (read_path, active_name) = if primary.exists() {
+                    (primary.clone(), primary.file_name().unwrap().to_os_string())
+                } else if disabled_path.exists() {
+                    // Strip the `.rig-disabled` suffix from the hashed
+                    // filename so the SHA matches install-time bytes.
+                    (disabled_path, primary.file_name().unwrap().to_os_string())
                 } else {
-                    let file_name = primary.file_name().unwrap().to_string_lossy();
-                    let mut bytes = Vec::new();
-                    bytes.extend_from_slice(file_name.as_bytes());
-                    bytes.push(0);
-                    bytes.extend_from_slice(&rig_fs::read(&primary).map_err(to_other)?);
-                    bytes.push(0);
-                    Some(Sha256::of(&bytes))
-                }
+                    return Ok((
+                        DriftState::Missing,
+                        DriftShas {
+                            install_time,
+                            current_disk: None,
+                            upstream,
+                        },
+                    ));
+                };
+                let file_name = active_name.to_string_lossy();
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(file_name.as_bytes());
+                bytes.push(0);
+                bytes.extend_from_slice(&rig_fs::read(&read_path).map_err(to_other)?);
+                bytes.push(0);
+                Some(Sha256::of(&bytes))
             }
         };
 
@@ -639,5 +776,222 @@ mod tests {
             adapter.install(&rule, Scope::Local),
             Err(AdapterError::Unsupported(UnitType::Rule))
         ));
+    }
+
+    // ---------------- Wedge B: enable / disable ----------------
+
+    #[test]
+    fn disable_enable_rule_stays_clean() {
+        let tmp = tempdir("disable-rule");
+        with_home(&tmp, || {
+            let a = ClaudeAdapter::new();
+            let unit = Unit::Rule(rig_core::unit::Rule {
+                name: "ts-strict".into(),
+                description: None,
+                body: "rule body\n".into(),
+                placement: Default::default(),
+            });
+            let r = a.install(&unit, Scope::Global).unwrap();
+            let install_sha = r.install_sha.clone();
+
+            // Baseline: Clean.
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, install_sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+
+            // Disable.
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+            assert!(!a.is_enabled(&r.unit_ref, Scope::Global).unwrap());
+            // Drift stays Clean after disable.
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, install_sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+
+            // list() surfaces with disabled=true.
+            let listed = a.list(Scope::Global).unwrap();
+            let entry = listed
+                .iter()
+                .find(|u| u.unit_ref.name == "ts-strict")
+                .unwrap();
+            assert!(entry.disabled);
+
+            // Enable.
+            a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap();
+            assert!(a.is_enabled(&r.unit_ref, Scope::Global).unwrap());
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, install_sha, None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn disable_enable_skill_stays_clean() {
+        let tmp = tempdir("disable-skill");
+        with_home(&tmp, || {
+            let a = ClaudeAdapter::new();
+            let unit = Unit::Skill(sample_skill());
+            let r = a.install(&unit, Scope::Global).unwrap();
+            let install_sha = r.install_sha.clone();
+
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, install_sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+            assert!(!a.is_enabled(&r.unit_ref, Scope::Global).unwrap());
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, install_sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+
+            a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap();
+            assert!(a.is_enabled(&r.unit_ref, Scope::Global).unwrap());
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, install_sha, None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn enable_collision_errors() {
+        let tmp = tempdir("collision");
+        with_home(&tmp, || {
+            let a = ClaudeAdapter::new();
+            let unit = Unit::Rule(rig_core::unit::Rule {
+                name: "x".into(),
+                description: None,
+                body: "x\n".into(),
+                placement: Default::default(),
+            });
+            let r = a.install(&unit, Scope::Global).unwrap();
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+
+            // User creates a non-Rig file at the active path.
+            let active = &r.paths[0];
+            std::fs::write(active, b"user-content\n").unwrap();
+
+            let err = a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap_err();
+            assert!(matches!(err, AdapterError::TargetCollision { .. }));
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn command_and_subagent_toggle_roundtrip() {
+        let tmp = tempdir("toggle-cmd-sub");
+        with_home(&tmp, || {
+            let a = ClaudeAdapter::new();
+            let cmd = Unit::Command(rig_core::unit::Command {
+                name: "review".into(),
+                description: None,
+                body: "run review\n".into(),
+                tools: vec![],
+            });
+            let sub = Unit::Subagent(rig_core::unit::Subagent {
+                name: "sec".into(),
+                description: "d".into(),
+                tools: vec![],
+                model: None,
+                body: "b\n".into(),
+            });
+            let rc = a.install(&cmd, Scope::Global).unwrap();
+            let rs = a.install(&sub, Scope::Global).unwrap();
+
+            a.set_enabled(&rc.unit_ref, Scope::Global, false).unwrap();
+            a.set_enabled(&rs.unit_ref, Scope::Global, false).unwrap();
+            let (st1, _) = a
+                .detect_drift(&rc.unit_ref, Scope::Global, rc.install_sha.clone(), None)
+                .unwrap();
+            let (st2, _) = a
+                .detect_drift(&rs.unit_ref, Scope::Global, rs.install_sha.clone(), None)
+                .unwrap();
+            assert_eq!(st1, DriftState::Clean);
+            assert_eq!(st2, DriftState::Clean);
+            a.set_enabled(&rc.unit_ref, Scope::Global, true).unwrap();
+            a.set_enabled(&rs.unit_ref, Scope::Global, true).unwrap();
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn hook_plugin_toggle_unsupported() {
+        let a = ClaudeAdapter::new();
+        let r = a.set_enabled(&UnitRef::new(UnitType::Hook, "x"), Scope::Global, false);
+        assert!(matches!(r, Err(AdapterError::UnsupportedOp(_))));
+    }
+
+    #[test]
+    fn skill_extra_frontmatter_survives_disable_enable() {
+        let tmp = tempdir("extra-fm");
+        with_home(&tmp, || {
+            let a = ClaudeAdapter::new();
+            let mut extra = std::collections::BTreeMap::new();
+            extra.insert("author".to_owned(), toml::Value::String("acme".into()));
+            extra.insert("license".to_owned(), toml::Value::String("MIT".into()));
+            let sk = rig_core::unit::Skill {
+                name: "rr".into(),
+                description: "d".into(),
+                extra_frontmatter: extra.clone(),
+                body: "body\n".into(),
+                resources: Vec::new(),
+            };
+            let r = a.install(&Unit::Skill(sk.clone()), Scope::Global).unwrap();
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+            a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap();
+            let back = a.read_local(&r.unit_ref, Scope::Global).unwrap();
+            if let Unit::Skill(s) = back {
+                assert_eq!(s.extra_frontmatter, extra);
+            } else {
+                panic!("not a skill");
+            }
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn mcp_json_reconstructor_roundtrip_per_transport() {
+        // Pure function — no filesystem. Covers all three transports.
+        let stdio = rig_core::unit::Mcp {
+            name: "gh".into(),
+            description: None,
+            transport: rig_core::unit::Transport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "s".into()],
+            },
+            env: vec!["T".into()],
+            metadata: Default::default(),
+        };
+        let http = rig_core::unit::Mcp {
+            name: "f".into(),
+            description: None,
+            transport: rig_core::unit::Transport::Http {
+                url: "https://x/".into(),
+                headers: [("K".to_owned(), "v".to_owned())].into_iter().collect(),
+            },
+            env: Vec::new(),
+            metadata: Default::default(),
+        };
+        let sse = rig_core::unit::Mcp {
+            name: "s".into(),
+            description: None,
+            transport: rig_core::unit::Transport::Sse {
+                url: "https://y/".into(),
+                headers: Default::default(),
+            },
+            env: Vec::new(),
+            metadata: Default::default(),
+        };
+        for m in [stdio, http, sse] {
+            let j = disabled::mcp_to_snapshot_json(&m);
+            let back = disabled::snapshot_json_to_mcp(&m.name, &j).unwrap();
+            assert_eq!(back, m);
+        }
     }
 }

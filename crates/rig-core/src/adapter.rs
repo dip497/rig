@@ -48,6 +48,11 @@ pub struct InstalledUnit {
     pub unit_ref: UnitRef,
     pub scope: Scope,
     pub paths: Vec<PathBuf>,
+    /// Whether the unit is currently disabled via `rig disable` (or
+    /// an equivalent agent-native mechanism Rig has observed).
+    /// Defaults to `false` / enabled for adapters that don't track it.
+    /// See `docs/ENABLE-DISABLE-MV.md` §6.
+    pub disabled: bool,
 }
 
 /// Errors an adapter may raise. `rig-core` owns the error type so the
@@ -60,6 +65,14 @@ pub enum AdapterError {
     NotFound(String, Scope),
     #[error("lossy conversion for `{unit}`: {reason}")]
     Lossy { unit: String, reason: String },
+    /// Operation (typically `enable`) would overwrite an existing
+    /// non-Rig file on disk. See `docs/ENABLE-DISABLE-MV.md` §5.
+    #[error("enable target already exists: {path}")]
+    TargetCollision { path: String },
+    /// Feature explicitly not implemented for this adapter (e.g.
+    /// enable/disable on Hook / Plugin unit types in M1).
+    #[error("operation `{0}` is not supported by this adapter")]
+    UnsupportedOp(&'static str),
     #[error("{message}")]
     Other {
         message: String,
@@ -130,4 +143,37 @@ pub trait Adapter: Send + Sync {
         install_time: Sha256,
         upstream: Option<Sha256>,
     ) -> AdapterResult<(DriftState, DriftShas)>;
+
+    /// Toggle the enabled state of an installed unit. Per
+    /// `docs/ENABLE-DISABLE-MV.md` §§3-5, mechanism varies by unit
+    /// type (frontmatter flip for Skill; file rename for Rule /
+    /// Command / Subagent; snapshot + remove for MCP).
+    ///
+    /// # Errors
+    /// - [`AdapterError::UnsupportedOp`] when the adapter or unit
+    ///   type does not support disable/enable (Hook, Plugin).
+    /// - [`AdapterError::NotFound`] when the unit is not installed.
+    /// - [`AdapterError::TargetCollision`] when enabling would
+    ///   clobber a non-Rig file.
+    /// - [`AdapterError::Other`] on I/O failure.
+    ///
+    /// [`AdapterError::UnsupportedOp`]: AdapterError::UnsupportedOp
+    /// [`AdapterError::NotFound`]: AdapterError::NotFound
+    /// [`AdapterError::TargetCollision`]: AdapterError::TargetCollision
+    /// [`AdapterError::Other`]: AdapterError::Other
+    fn set_enabled(&self, unit_ref: &UnitRef, scope: Scope, enabled: bool) -> AdapterResult<()> {
+        let _ = (unit_ref, scope, enabled);
+        Err(AdapterError::UnsupportedOp("enable/disable"))
+    }
+
+    /// Report whether the installed unit is currently enabled.
+    /// Default impl returns [`AdapterError::UnsupportedOp`].
+    ///
+    /// # Errors
+    /// Same as [`set_enabled`](Self::set_enabled) minus
+    /// `TargetCollision`.
+    fn is_enabled(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<bool> {
+        let _ = (unit_ref, scope);
+        Err(AdapterError::UnsupportedOp("enable/disable"))
+    }
 }

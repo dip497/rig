@@ -40,6 +40,7 @@ fn installed_to_dto(iu: rig_core::adapter::InstalledUnit, agent: &str) -> Instal
         unit_type: unit_type_slug(iu.unit_ref.unit_type).to_owned(),
         name: iu.unit_ref.name,
         paths: iu.paths,
+        disabled: iu.disabled,
     }
 }
 
@@ -285,6 +286,7 @@ fn install_unit(
             unit_type: unit_type_slug(unit_type).to_owned(),
             name: receipt.unit_ref.name.clone(),
             paths: receipt.paths,
+            disabled: false,
         });
     }
 

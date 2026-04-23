@@ -145,6 +145,25 @@ enum Command {
     },
     /// Audit: duplicates across agents, broken symlinks.
     Doctor,
+    /// Soft-disable an installed unit. Drift stays `Clean`; lockfile
+    /// is not mutated. See `docs/ENABLE-DISABLE-MV.md`.
+    Disable {
+        target: String,
+        /// Target agent(s). Comma-separated. If omitted, every agent
+        /// that currently has the unit installed in the resolved scope.
+        #[arg(long, value_delimiter = ',')]
+        agent: Option<Vec<CliAgent>>,
+        #[arg(long, value_enum)]
+        scope: Option<CliScope>,
+    },
+    /// Re-enable a previously disabled unit.
+    Enable {
+        target: String,
+        #[arg(long, value_delimiter = ',')]
+        agent: Option<Vec<CliAgent>>,
+        #[arg(long, value_enum)]
+        scope: Option<CliScope>,
+    },
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -290,6 +309,16 @@ fn main() -> Result<()> {
             scope,
         } => unlink(&target, agent.as_deref(), scope.into()),
         Command::Doctor => doctor(),
+        Command::Disable {
+            target,
+            agent,
+            scope,
+        } => toggle(&target, agent.as_deref(), scope, false),
+        Command::Enable {
+            target,
+            agent,
+            scope,
+        } => toggle(&target, agent.as_deref(), scope, true),
     }
 }
 
@@ -1054,6 +1083,8 @@ struct ListEntry<'a> {
     scope: &'static str,
     paths: Vec<String>,
     linked: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    disabled: bool,
 }
 
 fn list(scope: CoreScope, json: bool) -> Result<()> {
@@ -1074,6 +1105,7 @@ fn list(scope: CoreScope, json: bool) -> Result<()> {
                     u.unit_ref.name.clone(),
                     *sc,
                 )),
+                disabled: u.disabled,
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -1091,13 +1123,14 @@ fn list(scope: CoreScope, json: bool) -> Result<()> {
             *sc,
         ));
         println!(
-            "{}/{} ({} file{}) [{}]{}",
+            "{}/{} ({} file{}) [{}]{}{}",
             type_slug(u.unit_ref.unit_type),
             u.unit_ref.name,
             u.paths.len(),
             if u.paths.len() == 1 { "" } else { "s" },
             agent,
             if linked { " (linked)" } else { "" },
+            if u.disabled { " [disabled]" } else { "" },
         );
     }
     Ok(())
@@ -1656,6 +1689,28 @@ fn doctor() -> Result<()> {
 fn collect_all(
     scopes: &[CoreScope],
 ) -> Result<Vec<(rig_core::agent::AgentId, CoreScope, InstalledUnit)>> {
+    // Pre-compute the set of `(agent, scope, mcp_name)` tuples that
+    // Rig's lockfile claims ownership of. Used to filter foreign MCP
+    // entries added directly via `claude mcp add` from `rig list`
+    // output — spec MCP-SUPPORT.md §6 (deferred from Wedge A).
+    let mut rig_mcp: std::collections::HashSet<(String, CoreScope, String)> =
+        std::collections::HashSet::new();
+    for &sc in scopes {
+        if let Ok(lock) = store::load_lockfile(sc) {
+            for e in &lock.entries {
+                if e.unit_type == UnitType::Mcp {
+                    let native_name = e.native_name.clone().unwrap_or_else(|| {
+                        // Fall back to parsing the lockfile id.
+                        e.id.rsplit_once('/')
+                            .map(|(_, n)| n.to_owned())
+                            .unwrap_or_default()
+                    });
+                    rig_mcp.insert((e.agent.as_str().to_owned(), e.scope, native_name));
+                }
+            }
+        }
+    }
+
     let mut out: Vec<(rig_core::agent::AgentId, CoreScope, InstalledUnit)> = Vec::new();
     for adapter in [
         Box::new(ClaudeAdapter::new()) as Box<dyn Adapter>,
@@ -1667,6 +1722,19 @@ fn collect_all(
                 Err(_) => continue,
             };
             for u in units {
+                // Hide foreign MCP entries — anything the adapter
+                // surfaces for UnitType::Mcp that is NOT in Rig's
+                // lockfile.
+                if u.unit_ref.unit_type == UnitType::Mcp {
+                    let key = (
+                        adapter.agent().as_str().to_owned(),
+                        sc,
+                        u.unit_ref.name.clone(),
+                    );
+                    if !rig_mcp.contains(&key) {
+                        continue;
+                    }
+                }
                 out.push((adapter.agent(), sc, u));
             }
         }
@@ -1702,12 +1770,139 @@ fn collect_all(
                     unit_ref: UnitRef::new(e.unit_type, e.name),
                     scope: sc,
                     paths,
+                    disabled: false,
                 },
             ));
         }
     }
 
     Ok(out)
+}
+
+/// Resolve the scope for a toggle target. If `--scope` was given, use
+/// that. Otherwise look for the unit across global/project/local and
+/// pick the one scope where it's installed. Returns exit-code 22 if
+/// installed in more than one, 20 if none.
+fn resolve_toggle_scope(
+    unit_type: UnitType,
+    name: &str,
+    scope: Option<CliScope>,
+) -> Result<CoreScope> {
+    if let Some(s) = scope {
+        return Ok(s.into());
+    }
+    let all = collect_all(&[CoreScope::Global, CoreScope::Project, CoreScope::Local])?;
+    let matches: std::collections::HashSet<CoreScope> = all
+        .iter()
+        .filter(|(_, _, u)| u.unit_ref.unit_type == unit_type && u.unit_ref.name == name)
+        .map(|(_, s, _)| *s)
+        .collect();
+    if matches.is_empty() {
+        std::process::exit(20);
+    }
+    if matches.len() > 1 {
+        eprintln!(
+            "ambiguous scope: `{}/{}` is installed in {:?}; pass --scope",
+            type_slug(unit_type),
+            name,
+            matches.iter().map(|s| scope_slug(*s)).collect::<Vec<_>>(),
+        );
+        std::process::exit(22);
+    }
+    Ok(*matches.iter().next().unwrap())
+}
+
+fn toggle(
+    target: &str,
+    agents: Option<&[CliAgent]>,
+    scope: Option<CliScope>,
+    enabled: bool,
+) -> Result<()> {
+    let (ty_slug, name) = target
+        .split_once('/')
+        .with_context(|| format!("target must be `<type>/<name>`, got `{target}`"))?;
+    let unit_type = parse_type(ty_slug)?;
+
+    // Guard against unsupported-in-M1 types up front (spec §7 exit 23).
+    if matches!(unit_type, UnitType::Hook | UnitType::Plugin) {
+        eprintln!(
+            "{}/{} unit type does not support toggle (tracked as open question O1 in docs/ENABLE-DISABLE-MV.md)",
+            ty_slug, name,
+        );
+        std::process::exit(23);
+    }
+
+    let scope = resolve_toggle_scope(unit_type, name, scope)?;
+
+    // Figure out which agents to touch.
+    let target_agents: Vec<CliAgent> = if let Some(a) = agents {
+        a.to_vec()
+    } else {
+        // Query collect_all to see which agents actually have it.
+        let all = collect_all(&[scope])?;
+        let mut out: Vec<CliAgent> = Vec::new();
+        for (agent_id, _, u) in &all {
+            if u.unit_ref.unit_type != unit_type || u.unit_ref.name != name {
+                continue;
+            }
+            let ag = match agent_id.as_str() {
+                s if s == rig_adapter_claude::AGENT_ID => CliAgent::Claude,
+                s if s == rig_adapter_codex::AGENT_ID => CliAgent::Codex,
+                _ => continue,
+            };
+            if !out.contains(&ag) {
+                out.push(ag);
+            }
+        }
+        if out.is_empty() {
+            std::process::exit(20);
+        }
+        out
+    };
+
+    let unit_ref = UnitRef::new(unit_type, name.to_owned());
+    let verb = if enabled { "enabled" } else { "disabled" };
+    let mut io_failure = false;
+    let mut target_collision = false;
+    let mut unsupported = false;
+
+    println!("{verb} {target}");
+    for ag in target_agents {
+        let adapter = ag.adapter();
+        match adapter.set_enabled(&unit_ref, scope, enabled) {
+            Ok(()) => {
+                println!("  {}  {scope}", ag.id());
+            }
+            Err(rig_core::adapter::AdapterError::UnsupportedOp(_))
+            | Err(rig_core::adapter::AdapterError::Unsupported(_)) => {
+                eprintln!("  {}  {scope}  [unsupported]", ag.id());
+                unsupported = true;
+            }
+            Err(rig_core::adapter::AdapterError::TargetCollision { path }) => {
+                eprintln!("  {}  {scope}  [collision: {path}]", ag.id());
+                target_collision = true;
+            }
+            Err(rig_core::adapter::AdapterError::NotFound(_, _)) => {
+                eprintln!("  {}  {scope}  [not installed]", ag.id());
+                io_failure = true;
+            }
+            Err(e) => {
+                eprintln!("  {}  {scope}  [error: {e}]", ag.id());
+                io_failure = true;
+            }
+        }
+    }
+
+    if target_collision {
+        std::process::exit(21);
+    }
+    if unsupported {
+        std::process::exit(23);
+    }
+    if io_failure {
+        std::process::exit(24);
+    }
+    Ok(())
 }
 
 fn type_slug(t: UnitType) -> &'static str {
@@ -1994,6 +2189,30 @@ mod tests {
                 OnDrift::Cancel,
             );
             assert!(res.is_err());
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// `collect_all` must hide MCP entries the adapter reports if
+    /// Rig's lockfile doesn't own them — spec MCP-SUPPORT.md §6 /
+    /// ENABLE-DISABLE-MV.md wedge A deferred.
+    #[test]
+    fn foreign_mcp_filtered_from_list() {
+        let tmp = tempdir("foreign-mcp");
+        with_home(&tmp, || {
+            // Seed `~/.claude.json` with a foreign MCP entry.
+            let claude_json = tmp.join(".claude.json");
+            std::fs::write(
+                &claude_json,
+                r#"{"mcpServers":{"foreign":{"type":"stdio","command":"echo","args":[]}}}"#,
+            )
+            .unwrap();
+            // No rig.lock → foreign MCP is NOT in Rig's lockfile.
+            let collected = collect_all(&[CoreScope::Global]).unwrap();
+            let leaked = collected
+                .iter()
+                .any(|(_, _, u)| u.unit_ref.unit_type == UnitType::Mcp);
+            assert!(!leaked, "foreign MCP leaked into collect_all");
         });
         std::fs::remove_dir_all(&tmp).ok();
     }

@@ -30,6 +30,8 @@ export interface InstalledUnitDto {
   unitType: string;
   name: string;
   paths: string[];
+  /** Mirrors InstalledUnitDto.disabled (rig enable / rig disable). */
+  disabled?: boolean;
 }
 
 export interface DriftReportDto {

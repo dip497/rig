@@ -30,6 +30,10 @@ pub struct InstalledUnitDto {
     pub unit_type: String,
     pub name: String,
     pub paths: Vec<PathBuf>,
+    /// Whether the unit is soft-disabled (`rig disable`). Additive,
+    /// defaults to `false` so older clients stay backward-compatible.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

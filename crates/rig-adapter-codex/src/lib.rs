@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 mod command;
+pub mod disabled;
 mod frontmatter;
 pub mod mcp;
 mod rule;
@@ -71,7 +72,11 @@ fn type_root(scope: Scope, unit_type: UnitType) -> AdapterResult<PathBuf> {
 
 /// Where the primary file of a unit lives on disk. For skills it's a
 /// directory; for everything else it's a single `.md` file.
-fn primary_path(scope: Scope, unit_type: UnitType, name: &str) -> AdapterResult<PathBuf> {
+pub(crate) fn primary_path(
+    scope: Scope,
+    unit_type: UnitType,
+    name: &str,
+) -> AdapterResult<PathBuf> {
     let root = type_root(scope, unit_type)?;
     Ok(match unit_type {
         UnitType::Skill => root.join(name),
@@ -86,6 +91,13 @@ pub struct CodexAdapter {
     /// false. Spec §5 / §11.
     mcp_supported: bool,
 }
+
+/// Test-only counter incremented each time `mcp::probe_supported()`
+/// actually spawns a subprocess. Used to assert the probe runs at
+/// most once per adapter construction.
+#[cfg(test)]
+pub static PROBE_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 impl CodexAdapter {
     #[must_use]
@@ -195,6 +207,10 @@ impl Adapter for CodexAdapter {
             if !self.mcp_supported {
                 return Err(AdapterError::Unsupported(UnitType::Mcp));
             }
+            // Clean up disable snapshot if any.
+            if let Ok(snap) = disabled::mcp_snapshot_path(scope, &unit_ref.name) {
+                let _ = std::fs::remove_file(&snap);
+            }
             return mcp::uninstall(&unit_ref.name, scope);
         }
         let p = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
@@ -209,6 +225,9 @@ impl Adapter for CodexAdapter {
             }
             _ => {
                 rig_fs::remove_if_exists(&p).map_err(to_other)?;
+                // Clean up disabled twin.
+                let d = disabled::add_suffix(&p);
+                rig_fs::remove_if_exists(&d).map_err(to_other)?;
             }
         }
         Ok(())
@@ -228,7 +247,29 @@ impl Adapter for CodexAdapter {
                             unit_ref: UnitRef::new(UnitType::Mcp, m.name),
                             scope,
                             paths: vec![cfg.clone()],
+                            disabled: false,
                         });
+                    }
+                }
+            }
+            // Surface disabled MCP snapshots.
+            let base = rig_fs::home_dir().ok();
+            if let Some(h) = base {
+                let dir = h.join(".rig").join("disabled").join("mcp");
+                if dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&dir) {
+                        for e in entries.flatten() {
+                            let name_os = e.file_name();
+                            let file_name = name_os.to_string_lossy();
+                            if let Some(stem) = file_name.strip_suffix(".codex.json") {
+                                out.push(InstalledUnit {
+                                    unit_ref: UnitRef::new(UnitType::Mcp, stem.to_owned()),
+                                    scope,
+                                    paths: vec![e.path()],
+                                    disabled: true,
+                                });
+                            }
+                        }
                     }
                 }
             }
@@ -267,14 +308,20 @@ impl Adapter for CodexAdapter {
                             continue;
                         }
                         let skill_md = p.join(skill::SKILL_FILE);
-                        if !skill_md.exists() {
+                        let skill_md_disabled = disabled::add_suffix(&p.join(skill::SKILL_FILE));
+                        let (primary_file, is_disabled) = if skill_md.exists() {
+                            (skill_md, false)
+                        } else if skill_md_disabled.exists() {
+                            (skill_md_disabled, true)
+                        } else {
                             continue;
-                        }
+                        };
                         let name = entry.file_name().to_string_lossy().into_owned();
                         out.push(InstalledUnit {
                             unit_ref: UnitRef::new(ty, name),
                             scope,
-                            paths: collect_files(&p).unwrap_or_else(|_| vec![skill_md]),
+                            paths: collect_files(&p).unwrap_or_else(|_| vec![primary_file]),
+                            disabled: is_disabled,
                         });
                     }
                     _ => {
@@ -282,13 +329,19 @@ impl Adapter for CodexAdapter {
                             continue;
                         }
                         let name = entry.file_name().to_string_lossy().into_owned();
-                        let Some(stem) = name.strip_suffix(".md") else {
-                            continue;
-                        };
+                        let (stem, is_disabled) =
+                            if let Some(stem) = name.strip_suffix(".md.rig-disabled") {
+                                (stem.to_owned(), true)
+                            } else if let Some(stem) = name.strip_suffix(".md") {
+                                (stem.to_owned(), false)
+                            } else {
+                                continue;
+                            };
                         out.push(InstalledUnit {
-                            unit_ref: UnitRef::new(ty, stem.to_owned()),
+                            unit_ref: UnitRef::new(ty, stem),
                             scope,
                             paths: vec![p],
+                            disabled: is_disabled,
                         });
                     }
                 }
@@ -307,15 +360,20 @@ impl Adapter for CodexAdapter {
         let primary = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         let native = match unit_ref.unit_type {
             UnitType::Skill => {
-                if !primary.join(skill::SKILL_FILE).exists() {
+                let skill_md = primary.join(skill::SKILL_FILE);
+                let skill_md_disabled = disabled::add_suffix(&skill_md);
+                if !skill_md.exists() && !skill_md_disabled.exists() {
                     return Err(AdapterError::NotFound(unit_ref.name.clone(), scope));
                 }
                 let files = collect_files(&primary).map_err(to_other)?;
                 let mut out = Vec::with_capacity(files.len());
                 for p in files {
-                    let rel = p
+                    // Strip `.rig-disabled` off the relative path so
+                    // `parse_native` still recognises `SKILL.md`.
+                    let stripped = disabled::strip_suffix(&p);
+                    let rel = stripped
                         .strip_prefix(&primary)
-                        .unwrap_or(&p)
+                        .unwrap_or(&stripped)
                         .to_string_lossy()
                         .into_owned();
                     let bytes = rig_fs::read(&p).map_err(to_other)?;
@@ -327,10 +385,15 @@ impl Adapter for CodexAdapter {
                 NativeLayout { files: out }
             }
             _ => {
-                if !primary.exists() {
+                let disabled_p = disabled::add_suffix(&primary);
+                let read_path = if primary.exists() {
+                    primary.clone()
+                } else if disabled_p.exists() {
+                    disabled_p
+                } else {
                     return Err(AdapterError::NotFound(unit_ref.name.clone(), scope));
-                }
-                let bytes = rig_fs::read(&primary).map_err(to_other)?;
+                };
+                let bytes = rig_fs::read(&read_path).map_err(to_other)?;
                 NativeLayout {
                     files: vec![NativeFile {
                         relative_path: primary.file_name().unwrap().to_string_lossy().into_owned(),
@@ -370,13 +433,22 @@ impl Adapter for CodexAdapter {
         let primary = primary_path(scope, unit_ref.unit_type, &unit_ref.name)?;
         let current = match unit_ref.unit_type {
             UnitType::Skill => {
-                if !primary.join(skill::SKILL_FILE).exists() {
+                let skill_md = primary.join(skill::SKILL_FILE);
+                let skill_md_disabled = disabled::add_suffix(&skill_md);
+                if !skill_md.exists() && !skill_md_disabled.exists() {
                     None
                 } else {
                     let files = collect_files(&primary).map_err(to_other)?;
                     let mut bytes = Vec::new();
                     for p in files {
-                        let rel = p.strip_prefix(&primary).unwrap_or(&p).to_string_lossy();
+                        // Strip `.rig-disabled` from the SKILL.md
+                        // filename before hashing so a disabled skill
+                        // stays Clean.
+                        let stripped = disabled::strip_suffix(&p);
+                        let rel = stripped
+                            .strip_prefix(&primary)
+                            .unwrap_or(&stripped)
+                            .to_string_lossy();
                         bytes.extend_from_slice(rel.as_bytes());
                         bytes.push(0);
                         bytes.extend_from_slice(&rig_fs::read(&p).map_err(to_other)?);
@@ -386,17 +458,28 @@ impl Adapter for CodexAdapter {
                 }
             }
             _ => {
-                if !primary.exists() {
-                    None
+                let disabled_path = disabled::add_suffix(&primary);
+                let (read_path, active_name) = if primary.exists() {
+                    (primary.clone(), primary.file_name().unwrap().to_os_string())
+                } else if disabled_path.exists() {
+                    (disabled_path, primary.file_name().unwrap().to_os_string())
                 } else {
-                    let file_name = primary.file_name().unwrap().to_string_lossy();
-                    let mut bytes = Vec::new();
-                    bytes.extend_from_slice(file_name.as_bytes());
-                    bytes.push(0);
-                    bytes.extend_from_slice(&rig_fs::read(&primary).map_err(to_other)?);
-                    bytes.push(0);
-                    Some(Sha256::of(&bytes))
-                }
+                    return Ok((
+                        DriftState::Missing,
+                        DriftShas {
+                            install_time,
+                            current_disk: None,
+                            upstream,
+                        },
+                    ));
+                };
+                let file_name = active_name.to_string_lossy();
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(file_name.as_bytes());
+                bytes.push(0);
+                bytes.extend_from_slice(&rig_fs::read(&read_path).map_err(to_other)?);
+                bytes.push(0);
+                Some(Sha256::of(&bytes))
             }
         };
 
@@ -411,6 +494,52 @@ impl Adapter for CodexAdapter {
             shas.classify()
         };
         Ok((state, shas))
+    }
+
+    fn set_enabled(&self, unit_ref: &UnitRef, scope: Scope, enabled: bool) -> AdapterResult<()> {
+        match unit_ref.unit_type {
+            UnitType::Skill | UnitType::Rule | UnitType::Command | UnitType::Subagent => {
+                if matches!(scope, Scope::Local) {
+                    return Err(AdapterError::Unsupported(unit_ref.unit_type));
+                }
+                disabled::set_file_disabled(scope, unit_ref.unit_type, &unit_ref.name, enabled)
+            }
+            UnitType::Mcp => {
+                if !self.mcp_supported {
+                    return Err(AdapterError::Unsupported(UnitType::Mcp));
+                }
+                mcp::ensure_global(scope)?;
+                if enabled {
+                    disabled::enable_mcp(&unit_ref.name, scope)
+                } else {
+                    disabled::disable_mcp(&unit_ref.name, scope)
+                }
+            }
+            UnitType::Hook | UnitType::Plugin => Err(AdapterError::UnsupportedOp("enable/disable")),
+        }
+    }
+
+    fn is_enabled(&self, unit_ref: &UnitRef, scope: Scope) -> AdapterResult<bool> {
+        match unit_ref.unit_type {
+            UnitType::Skill | UnitType::Rule | UnitType::Command | UnitType::Subagent => {
+                if matches!(scope, Scope::Local) {
+                    return Err(AdapterError::Unsupported(unit_ref.unit_type));
+                }
+                Ok(!disabled::file_is_disabled(
+                    scope,
+                    unit_ref.unit_type,
+                    &unit_ref.name,
+                )?)
+            }
+            UnitType::Mcp => {
+                if !self.mcp_supported {
+                    return Err(AdapterError::Unsupported(UnitType::Mcp));
+                }
+                mcp::ensure_global(scope)?;
+                Ok(!disabled::mcp_is_disabled(scope, &unit_ref.name)?)
+            }
+            UnitType::Hook | UnitType::Plugin => Err(AdapterError::UnsupportedOp("enable/disable")),
+        }
     }
 }
 
@@ -718,5 +847,127 @@ mod tests {
             adapter.install(&m, Scope::Project),
             Err(AdapterError::Unsupported(UnitType::Mcp))
         ));
+    }
+
+    // ---------------- Wedge B: enable / disable ----------------
+
+    #[test]
+    fn disable_enable_skill_stays_clean() {
+        let tmp = tempdir("codex-disable-skill");
+        with_home(&tmp, || {
+            let a = CodexAdapter::with_mcp_support(false);
+            let r = a
+                .install(&Unit::Skill(sample_skill()), Scope::Global)
+                .unwrap();
+            let sha = r.install_sha.clone();
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+            assert!(!a.is_enabled(&r.unit_ref, Scope::Global).unwrap());
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+
+            a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap();
+            assert!(a.is_enabled(&r.unit_ref, Scope::Global).unwrap());
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, sha, None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn disable_enable_rule_stays_clean() {
+        let tmp = tempdir("codex-disable-rule");
+        with_home(&tmp, || {
+            let a = CodexAdapter::with_mcp_support(false);
+            let r = a
+                .install(&Unit::Rule(sample_rule()), Scope::Global)
+                .unwrap();
+            let sha = r.install_sha.clone();
+
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, sha.clone(), None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+            a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap();
+            let (st, _) = a
+                .detect_drift(&r.unit_ref, Scope::Global, sha, None)
+                .unwrap();
+            assert_eq!(st, DriftState::Clean);
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Probe-cache: `capabilities()` / `list()` on a constructed
+    /// adapter must NEVER spawn the `codex mcp --help` probe again.
+    /// Serialises against the global HOME mutex so parallel tests
+    /// (which may construct other adapters) don't race our counter.
+    #[test]
+    fn probe_runs_once_per_adapter() {
+        let tmp = tempdir("probe-cache");
+        with_home(&tmp, || {
+            // Force a value so construction records one probe call.
+            let delta_start = PROBE_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+            let a = CodexAdapter::new();
+            let after_new = PROBE_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                after_new,
+                delta_start + 1,
+                "CodexAdapter::new() must probe exactly once",
+            );
+
+            // Hot-path calls must NOT re-probe — this is the invariant.
+            for _ in 0..5 {
+                let _ = a.capabilities();
+                let _ = a.list(Scope::Global);
+            }
+            assert_eq!(
+                PROBE_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+                after_new,
+                "capabilities/list must not re-probe",
+            );
+
+            // `with_mcp_support` bypasses the probe entirely.
+            let before = PROBE_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+            let _ = CodexAdapter::with_mcp_support(false);
+            assert_eq!(
+                PROBE_CALL_COUNT.load(std::sync::atomic::Ordering::SeqCst),
+                before,
+                "with_mcp_support must not probe",
+            );
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn hook_plugin_toggle_unsupported() {
+        let a = CodexAdapter::with_mcp_support(false);
+        let r = a.set_enabled(&UnitRef::new(UnitType::Hook, "x"), Scope::Global, false);
+        assert!(matches!(r, Err(AdapterError::UnsupportedOp(_))));
+    }
+
+    #[test]
+    fn enable_collision_errors() {
+        let tmp = tempdir("codex-collision");
+        with_home(&tmp, || {
+            let a = CodexAdapter::with_mcp_support(false);
+            let r = a
+                .install(&Unit::Rule(sample_rule()), Scope::Global)
+                .unwrap();
+            a.set_enabled(&r.unit_ref, Scope::Global, false).unwrap();
+            // User creates non-Rig file at active path.
+            std::fs::write(&r.paths[0], b"user-content\n").unwrap();
+            let err = a.set_enabled(&r.unit_ref, Scope::Global, true).unwrap_err();
+            assert!(matches!(err, AdapterError::TargetCollision { .. }));
+        });
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

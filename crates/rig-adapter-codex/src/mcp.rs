@@ -141,6 +141,10 @@ fn q(s: &str) -> String {
 /// One-shot probe at adapter-construction time: does `codex mcp` exist?
 /// Result is cached on the adapter so `capabilities()` stays O(1).
 pub(crate) fn probe_supported() -> bool {
+    #[cfg(test)]
+    {
+        crate::PROBE_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     let bin = std::env::var(CODEX_BIN_ENV).unwrap_or_else(|_| "codex".to_string());
     let out = Command::new(&bin)
         .args(["mcp", "--help"])

@@ -17,10 +17,21 @@ pub struct SkillConverter;
 
 impl Converter<Skill> for SkillConverter {
     fn to_native(&self, canonical: &Skill) -> AdapterResult<NativeLayout> {
-        let fm = frontmatter::render_flat(&[
-            ("name", &canonical.name),
-            ("description", &canonical.description),
-        ]);
+        let mut pairs: Vec<(&str, String)> = Vec::new();
+        pairs.push(("name", canonical.name.clone()));
+        pairs.push(("description", canonical.description.clone()));
+        for (k, v) in &canonical.extra_frontmatter {
+            let s = match v {
+                toml::Value::String(s) => s.clone(),
+                toml::Value::Boolean(b) => b.to_string(),
+                toml::Value::Integer(i) => i.to_string(),
+                toml::Value::Float(f) => f.to_string(),
+                other => other.to_string(),
+            };
+            pairs.push((k.as_str(), s));
+        }
+        let borrowed: Vec<(&str, &str)> = pairs.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let fm = frontmatter::render_flat(&borrowed);
         let mut contents = fm;
         contents.push('\n');
         contents.push_str(&canonical.body);
@@ -62,11 +73,17 @@ impl Converter<Skill> for SkillConverter {
         let pairs = frontmatter::parse_flat(fm_block);
         let mut name = None;
         let mut description = None;
+        let mut extra: std::collections::BTreeMap<String, toml::Value> =
+            std::collections::BTreeMap::new();
         for (k, v) in pairs {
             match k.as_str() {
                 "name" => name = Some(v),
                 "description" => description = Some(v),
-                _ => {} // extra frontmatter ignored for now
+                "disable-model-invocation" => {}
+                k if k.starts_with("rig-disabled-") => {}
+                _ => {
+                    extra.insert(k, toml::Value::String(v));
+                }
             }
         }
         let name = name.ok_or_else(|| AdapterError::Other {
@@ -88,7 +105,7 @@ impl Converter<Skill> for SkillConverter {
         Ok(Skill {
             name,
             description,
-            extra_frontmatter: Default::default(),
+            extra_frontmatter: extra,
             body: body.to_owned(),
             resources,
         })

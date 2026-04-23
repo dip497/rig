@@ -9,6 +9,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **`rig enable` / `rig disable`.** Toggle any installed unit on/off
+  without uninstalling. Uses Claude's native frontmatter flag for
+  skills (`disable-model-invocation: true`); file-rename trick for
+  rule/command/subagent; snapshot-and-restore for MCP entries. The
+  drift scanner normalises disable-related edits so disabled units
+  stay `Clean`. See `docs/ENABLE-DISABLE-MV.md`.
+- **CLI hides foreign MCP entries from `list`.** Foreign MCP servers
+  (added via `claude mcp add` outside Rig) are still respected at
+  install/uninstall — they just don't clutter Rig's list/search/stats.
 - **MCP unit support.** `rig install … --as mcp --agent claude,codex`
   installs MCP servers via the official `claude mcp` / `codex mcp`
   CLIs, with full list/status/uninstall/drift parity for skills.
