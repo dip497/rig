@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- **GUI theme system.** Full theme refactor per `docs/THEME-SYSTEM.md`:
+  Tailwind 4 `@theme` tokens (oklch), `ThemeProvider` with light/dark/
+  system modes, anti-FOUC boot script, theme toggle in header. All
+  components consume semantic tokens (`surface-1`, `fg-default`,
+  `accent-primary`, …); raw `slate`/`indigo` utilities removed from
+  `rig-gui/src/`. New `ui/` kit with `Button / Pill / Card / Badge /
+  Input / Modal / EmptyState / DriftBadge / ThemeToggle`.
 - **Review cleanup.** ADR-018 documents the M1 GUI direct-link (deferred
   rig-api seam until M2). README compressed to link concepts.md for
   Scope/Drift/Unit-types. Spec docs trimmed of linter-reminders and

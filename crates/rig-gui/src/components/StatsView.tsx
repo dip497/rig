@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { statsSummary } from "../lib/api";
 import type { Scope, ScopeSelection, StatsDto } from "../types";
+import { Card } from "../ui";
 
 interface Props {
   scope: ScopeSelection;
@@ -15,7 +16,6 @@ function humanBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
-/** Merge per-agent / per-type stats coming from multiple scopes. */
 function mergeStats(parts: StatsDto[]): StatsDto {
   const byAgent = new Map<
     string,
@@ -103,10 +103,14 @@ export default function StatsView({ scope, projectPath, hasProject }: Props) {
   }, [scope, projectPath, hasProject]);
 
   if (loading) {
-    return <div className="p-4 text-sm text-slate-500">Loading stats…</div>;
+    return <div className="p-4 text-sm text-fg-muted">Loading stats…</div>;
   }
   if (err) {
-    return <div className="m-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">{err}</div>;
+    return (
+      <div className="m-4 rounded-md border border-danger/40 bg-danger-subtle p-3 text-sm text-danger-fg">
+        {err}
+      </div>
+    );
   }
   if (!stats) {
     return null;
@@ -114,34 +118,34 @@ export default function StatsView({ scope, projectPath, hasProject }: Props) {
 
   return (
     <div className="p-4">
-      <div className="mb-4 rounded border border-slate-200 bg-slate-50 p-3">
-        <div className="text-xs font-semibold uppercase text-slate-500">
+      <Card className="mb-4 bg-surface-2">
+        <div className="text-xs font-semibold uppercase text-fg-muted">
           Grand total ({scope})
         </div>
-        <div className="text-lg font-semibold">
+        <div className="text-lg font-semibold text-fg-default">
           {stats.grandTotalCount} units, {humanBytes(stats.grandTotalBytes)}
         </div>
-      </div>
+      </Card>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
         {stats.agents.map((a) => (
-          <div key={a.agent} className="border border-slate-200 rounded p-3">
+          <Card key={a.agent}>
             <div className="mb-2 flex items-center justify-between">
-              <div className="text-sm font-semibold">{a.agent}</div>
-              <div className="text-xs text-slate-500">
+              <div className="text-sm font-semibold text-fg-default">{a.agent}</div>
+              <div className="text-xs text-fg-muted">
                 {a.totalCount} units · {humanBytes(a.totalBytes)}
               </div>
             </div>
             {a.byType.length === 0 ? (
-              <div className="text-xs text-slate-400">(empty)</div>
+              <div className="text-xs text-fg-subtle">(empty)</div>
             ) : (
               <table className="w-full text-xs">
                 <tbody>
                   {a.byType.map((t) => (
-                    <tr key={t.unitType} className="border-t border-slate-100">
-                      <td className="py-1 font-mono text-slate-700">{t.unitType}</td>
-                      <td className="py-1 text-right tabular-nums">{t.count}</td>
-                      <td className="py-1 text-right tabular-nums text-slate-500">
+                    <tr key={t.unitType} className="border-t border-border-default">
+                      <td className="py-1 font-mono text-fg-default">{t.unitType}</td>
+                      <td className="py-1 text-right tabular-nums text-fg-default">{t.count}</td>
+                      <td className="py-1 text-right tabular-nums text-fg-muted">
                         {humanBytes(t.bytes)}
                       </td>
                     </tr>
@@ -149,7 +153,7 @@ export default function StatsView({ scope, projectPath, hasProject }: Props) {
                 </tbody>
               </table>
             )}
-          </div>
+          </Card>
         ))}
       </div>
     </div>

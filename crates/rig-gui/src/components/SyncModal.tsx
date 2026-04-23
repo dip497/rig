@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { syncScope } from "../lib/api";
 import type { Scope, SyncResultDto } from "../types";
+import { Badge, Button, Modal } from "../ui";
 
 interface Props {
   scope: Scope;
@@ -48,100 +49,81 @@ export default function SyncModal({ scope, projectPath, onClose, onDone }: Props
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-      <div className="w-[560px] rounded-lg bg-white p-5 shadow-xl">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Sync bundles</h2>
-          <button
-            onClick={onClose}
-            className="text-slate-400 hover:text-slate-700"
-          >
-            ✕
-          </button>
+    <Modal title="Sync bundles" onClose={onClose} width="w-[560px]">
+      <div className="mb-3 text-xs text-fg-muted">
+        Scope: <span className="font-mono">{scope}</span>. Reads
+        <span className="font-mono"> .rig/rig.toml</span>, installs each
+        bundle entry, rewrites lockfile.
+      </div>
+
+      <div className="mb-4">
+        <div className="mb-1 text-xs font-semibold uppercase text-fg-muted">
+          On drift
         </div>
-
-        <div className="mb-3 text-xs text-slate-500">
-          Scope: <span className="font-mono">{scope}</span>. Reads
-          <span className="font-mono"> .rig/rig.toml</span>, installs each
-          bundle entry, rewrites lockfile.
+        <div className="space-y-1">
+          {MODES.map((m) => (
+            <label
+              key={m.id}
+              className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1 text-sm text-fg-default hover:bg-surface-2"
+            >
+              <input
+                type="radio"
+                className="mt-0.5"
+                name="mode"
+                checked={mode === m.id}
+                onChange={() => setMode(m.id)}
+              />
+              <div>
+                <div className="font-mono">{m.label}</div>
+                <div className="text-xs text-fg-muted">{m.desc}</div>
+              </div>
+            </label>
+          ))}
         </div>
-
-        <div className="mb-4">
-          <div className="mb-1 text-xs font-semibold uppercase text-slate-500">
-            On drift
-          </div>
-          <div className="space-y-1">
-            {MODES.map((m) => (
-              <label
-                key={m.id}
-                className="flex cursor-pointer items-start gap-2 rounded px-2 py-1 text-sm hover:bg-slate-50"
-              >
-                <input
-                  type="radio"
-                  className="mt-0.5"
-                  name="mode"
-                  checked={mode === m.id}
-                  onChange={() => setMode(m.id)}
-                />
-                <div>
-                  <div className="font-mono">{m.label}</div>
-                  <div className="text-xs text-slate-500">{m.desc}</div>
-                </div>
-              </label>
-            ))}
-          </div>
-          <div className="mt-2 text-xs text-slate-400">
-            diff-per-file is CLI-only (interactive TTY).
-          </div>
-        </div>
-
-        {err && (
-          <div className="mb-3 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-700">
-            {err}
-          </div>
-        )}
-
-        {res && (
-          <div className="mb-3 rounded border border-slate-200 bg-slate-50 p-2 text-xs">
-            <div>
-              Installed: <b>{res.installed.length}</b>, skipped:{" "}
-              <b>{res.skipped.length}</b>, conflicts:{" "}
-              <b>{res.conflicts.length}</b>
-              {res.cancelled && (
-                <span className="ml-2 rounded bg-yellow-100 px-2 text-yellow-800">
-                  cancelled
-                </span>
-              )}
-            </div>
-            {res.skipped.length > 0 && (
-              <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] text-slate-600">
-                {res.skipped.join("\n")}
-              </pre>
-            )}
-            {res.conflicts.length > 0 && (
-              <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] text-red-700">
-                {res.conflicts.join("\n")}
-              </pre>
-            )}
-          </div>
-        )}
-
-        <div className="flex items-center justify-end gap-2">
-          <button
-            onClick={onClose}
-            className="rounded border border-slate-300 bg-white px-3 py-1 text-sm hover:bg-slate-50"
-          >
-            Close
-          </button>
-          <button
-            onClick={run}
-            disabled={busy}
-            className="rounded bg-indigo-600 px-3 py-1 text-sm text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
-          >
-            {busy ? "Syncing…" : "Run Sync"}
-          </button>
+        <div className="mt-2 text-xs text-fg-subtle">
+          diff-per-file is CLI-only (interactive TTY).
         </div>
       </div>
-    </div>
+
+      {err && (
+        <div className="mb-3 rounded-md border border-danger/40 bg-danger-subtle p-2 text-xs text-danger-fg">
+          {err}
+        </div>
+      )}
+
+      {res && (
+        <div className="mb-3 rounded-md border border-border-default bg-surface-2 p-2 text-xs text-fg-default">
+          <div>
+            Installed: <b>{res.installed.length}</b>, skipped:{" "}
+            <b>{res.skipped.length}</b>, conflicts:{" "}
+            <b>{res.conflicts.length}</b>
+            {res.cancelled && (
+              <Badge color="warning" className="ml-2">
+                cancelled
+              </Badge>
+            )}
+          </div>
+          {res.skipped.length > 0 && (
+            <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] text-fg-muted">
+              {res.skipped.join("\n")}
+            </pre>
+          )}
+          {res.conflicts.length > 0 && (
+            <pre className="mt-1 whitespace-pre-wrap font-mono text-[10px] text-danger-fg">
+              {res.conflicts.join("\n")}
+            </pre>
+          )}
+        </div>
+      )}
+
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="secondary" size="sm" onClick={onClose}>
+          Close
+        </Button>
+        <Button variant="primary" size="sm" onClick={run} disabled={busy}>
+          {busy ? "Syncing…" : "Run Sync"}
+        </Button>
+      </div>
+    </Modal>
   );
 }

@@ -1,5 +1,5 @@
 import type { ScopeSelection } from "../types";
-import Pill from "./Pill";
+import { Pill } from "../ui";
 
 interface Props {
   scope: ScopeSelection;

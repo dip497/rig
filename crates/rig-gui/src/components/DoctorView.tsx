@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { doctorScan } from "../lib/api";
 import type { DoctorResultDto, Scope, ScopeSelection } from "../types";
+import { Badge, Button, Card } from "../ui";
 
 interface Props {
   scope: ScopeSelection;
@@ -65,11 +66,11 @@ export default function DoctorView({ scope, projectPath, hasProject }: Props) {
   }, [scan]);
 
   if (loading) {
-    return <div className="p-4 text-sm text-slate-500">Scanning…</div>;
+    return <div className="p-4 text-sm text-fg-muted">Scanning…</div>;
   }
   if (err) {
     return (
-      <div className="m-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+      <div className="m-4 rounded-md border border-danger/40 bg-danger-subtle p-3 text-sm text-danger-fg">
         {err}
       </div>
     );
@@ -86,25 +87,26 @@ export default function DoctorView({ scope, projectPath, hasProject }: Props) {
   return (
     <div className="p-4">
       <div className="mb-4 flex items-center justify-between">
-        <div className="text-sm text-slate-600">
+        <div className="text-sm text-fg-muted">
           Scope: <span className="font-mono">{scope}</span>
           {res.fixed > 0 && (
-            <span className="ml-3 rounded bg-green-100 px-2 py-0.5 text-xs text-green-800">
+            <Badge color="success" className="ml-3">
               fixed {res.fixed}
-            </span>
+            </Badge>
           )}
         </div>
-        <button
+        <Button
+          variant="primary"
+          size="sm"
           onClick={() => scan(true)}
           disabled={!canFix || fixing}
-          className="rounded bg-indigo-600 px-3 py-1 text-sm text-white shadow-sm hover:bg-indigo-700 disabled:opacity-40"
         >
           {fixing ? "Fixing…" : "Fix auto-reconcilable issues"}
-        </button>
+        </Button>
       </div>
 
       {nothingWrong && (
-        <div className="rounded border border-green-200 bg-green-50 p-3 text-sm text-green-800">
+        <div className="rounded-md border border-success/40 bg-success-subtle p-3 text-sm text-success-fg">
           All clean.
         </div>
       )}
@@ -112,30 +114,27 @@ export default function DoctorView({ scope, projectPath, hasProject }: Props) {
       {res.duplicates.length > 0 && (
         <Section title={`Duplicates (${res.duplicates.length})`}>
           {res.duplicates.map((d) => (
-            <div
-              key={`${d.unitType}/${d.name}`}
-              className="border border-slate-200 rounded p-2 mb-2"
-            >
-              <div className="font-mono text-sm">
+            <Card key={`${d.unitType}/${d.name}`} className="mb-2 p-2">
+              <div className="font-mono text-sm text-fg-default">
                 {d.unitType}/{d.name}
               </div>
-              <ul className="mt-1 text-xs text-slate-600">
+              <ul className="mt-1 text-xs text-fg-muted">
                 {d.locations.map((l, i) => (
                   <li key={i} className="font-mono">
                     [{l.agent}] ({l.scope}) {l.path}
                   </li>
                 ))}
               </ul>
-            </div>
+            </Card>
           ))}
         </Section>
       )}
 
       {res.brokenSymlinks.length > 0 && (
         <Section title={`Broken symlinks (${res.brokenSymlinks.length})`}>
-          <ul className="font-mono text-xs text-slate-700">
+          <ul className="font-mono text-xs text-fg-default">
             {res.brokenSymlinks.map((s, i) => (
-              <li key={i} className="border-t border-slate-100 py-1">
+              <li key={i} className="border-t border-border-default py-1">
                 {s}
               </li>
             ))}
@@ -145,9 +144,9 @@ export default function DoctorView({ scope, projectPath, hasProject }: Props) {
 
       {res.mvSplit.length > 0 && (
         <Section title={`Mv split-state (${res.mvSplit.length})`}>
-          <ul className="font-mono text-xs text-slate-700">
+          <ul className="font-mono text-xs text-fg-default">
             {res.mvSplit.map((s, i) => (
-              <li key={i} className="border-t border-slate-100 py-1">
+              <li key={i} className="border-t border-border-default py-1">
                 {s}
               </li>
             ))}
@@ -157,9 +156,9 @@ export default function DoctorView({ scope, projectPath, hasProject }: Props) {
 
       {res.mvStaleLock.length > 0 && (
         <Section title={`Stale lockfile entries (${res.mvStaleLock.length})`}>
-          <ul className="font-mono text-xs text-slate-700">
+          <ul className="font-mono text-xs text-fg-default">
             {res.mvStaleLock.map((s, i) => (
-              <li key={i} className="border-t border-slate-100 py-1">
+              <li key={i} className="border-t border-border-default py-1">
                 {s}
               </li>
             ))}
@@ -173,7 +172,7 @@ export default function DoctorView({ scope, projectPath, hasProject }: Props) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mb-4">
-      <h3 className="mb-2 text-sm font-semibold text-slate-800">{title}</h3>
+      <h3 className="mb-2 text-sm font-semibold text-fg-default">{title}</h3>
       {children}
     </div>
   );

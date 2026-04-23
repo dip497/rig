@@ -1,4 +1,4 @@
-import Pill from "./Pill";
+import { Pill } from "../ui";
 
 export type TypeFilter =
   | "all"
@@ -8,7 +8,6 @@ export type TypeFilter =
   | "command"
   | "subagent";
 
-// Pills the user sees; "subagent" is in the full type union but shown as-is.
 export const PILL_TYPES: TypeFilter[] = [
   "all",
   "skill",

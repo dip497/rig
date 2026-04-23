@@ -21,8 +21,6 @@ import {
   setCurrentProject,
   type OriginTaggedUnit,
 } from "./lib/project";
-// Sidebar intentionally unmounted — agent filter now lives inline as pills.
-// The file is kept on disk for possible re-introduction.
 import UnitTable, { type UnitRow } from "./components/UnitTable";
 import DetailPane from "./components/DetailPane";
 import ScopePill from "./components/ScopePill";
@@ -31,11 +29,11 @@ import SyncModal from "./components/SyncModal";
 import StatsView from "./components/StatsView";
 import DoctorView from "./components/DoctorView";
 import ProjectPicker from "./components/ProjectPicker";
-import Pill from "./components/Pill";
 import TypeFilterPills, {
   PILL_TYPES,
   type TypeFilter,
 } from "./components/TypeFilter";
+import { Button, Input, Pill, ThemeToggle } from "./ui";
 
 type View = "units" | "stats" | "doctor";
 
@@ -60,7 +58,7 @@ function writeLs(key: string, value: string) {
 
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="text-slate-400 text-[10px] border border-slate-200 rounded px-1 ml-2">
+    <kbd className="text-fg-subtle text-[10px] border border-border-default rounded-sm px-1 ml-2">
       {children}
     </kbd>
   );
@@ -329,26 +327,24 @@ export default function App() {
     scope !== "global" && !hasProject ? "no-project" : "no-match";
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-screen flex-col bg-bg-canvas text-fg-default">
       {/* Row 1 — app-level */}
-      <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2">
+      <header className="flex items-center justify-between border-b border-border-default bg-surface-1 px-4 py-2">
         <div className="flex items-center gap-3">
           <div className="text-lg font-bold tracking-tight">Rig</div>
           <ProjectPicker current={projectPath} onPick={setProjectPath} />
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={refresh}
-            className="flex items-center rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
-          >
+          <ThemeToggle />
+          <Button variant="secondary" size="sm" onClick={refresh}>
             {loading ? "Refreshing…" : "Refresh"}
             <Kbd>⌘R</Kbd>
-          </button>
+          </Button>
         </div>
       </header>
 
       {/* Tabs row */}
-      <div className="flex items-center gap-1 border-b border-slate-200 bg-white px-4 py-1.5">
+      <div className="flex items-center gap-1 border-b border-border-default bg-surface-1 px-4 py-1.5">
         <Pill active={view === "units"} onClick={() => setView("units")}>
           Units
         </Pill>
@@ -362,14 +358,14 @@ export default function App() {
 
       {/* Row 2 — context / view-level (Units only) */}
       {view === "units" && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-default bg-surface-2 px-4 py-2">
           <div className="flex flex-wrap items-center gap-3">
             <TypeFilterPills
               selected={typeFilter}
               counts={typeCounts}
               onChange={setTypeFilter}
             />
-            <div className="h-5 w-px bg-slate-300" />
+            <div className="h-5 w-px bg-border-default" />
             <div className="flex items-center gap-1">
               <Pill
                 active={selectedAgent === null}
@@ -391,7 +387,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2">
             <ScopePill scope={scope} onChange={setScope} hasProject={hasProject} />
             {scope === "all" && hasProject && (
-              <label className="flex items-center gap-1 text-xs text-slate-600">
+              <label className="flex items-center gap-1 text-xs text-fg-muted">
                 <input
                   type="checkbox"
                   checked={hideGlobal}
@@ -401,40 +397,34 @@ export default function App() {
               </label>
             )}
             <div className="flex items-center">
-              <input
+              <Input
                 ref={searchRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Search"
-                className="rounded border border-slate-300 px-2 py-1 text-sm w-48"
+                className="w-48"
               />
               <Kbd>⌘K</Kbd>
             </div>
-            <button
-              onClick={() => setShowSync(true)}
-              className="rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
-            >
+            <Button variant="secondary" size="sm" onClick={() => setShowSync(true)}>
               Sync
-            </button>
-            <button
-              onClick={() => setShowInstall(true)}
-              className="rounded bg-indigo-600 px-3 py-1 text-sm text-white shadow-sm hover:bg-indigo-700"
-            >
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => setShowInstall(true)}>
               + Install
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
       {needsProjectBanner && (
-        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+        <div className="border-b border-warning/40 bg-warning-subtle px-4 py-2 text-sm text-warning-fg">
           {needsProjectBanner}
         </div>
       )}
 
       {banner && (
         <div
-          className="border-b border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800 cursor-pointer"
+          className="border-b border-success/40 bg-success-subtle px-4 py-2 text-sm text-success-fg cursor-pointer"
           onClick={() => setBanner(null)}
         >
           {banner}
@@ -464,14 +454,14 @@ export default function App() {
       )}
 
       {error && (
-        <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">
+        <div className="border-b border-danger/40 bg-danger-subtle px-4 py-2 text-sm text-danger-fg">
           {error}
         </div>
       )}
 
       {view === "units" && (
         <div className="flex flex-1 overflow-hidden">
-          <main className="flex-1 overflow-auto bg-white">
+          <main className="flex-1 overflow-auto bg-surface-1">
             <UnitTable
               rows={rows}
               onSelect={setSelected}
@@ -531,7 +521,7 @@ export default function App() {
       )}
 
       {view === "stats" && (
-        <main className="flex-1 overflow-auto bg-white">
+        <main className="flex-1 overflow-auto bg-surface-1">
           <StatsView
             scope={scope}
             projectPath={projectPath ?? undefined}
@@ -541,7 +531,7 @@ export default function App() {
       )}
 
       {view === "doctor" && (
-        <main className="flex-1 overflow-auto bg-white">
+        <main className="flex-1 overflow-auto bg-surface-1">
           <DoctorView
             scope={scope}
             projectPath={projectPath ?? undefined}
