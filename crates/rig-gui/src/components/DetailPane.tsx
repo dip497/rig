@@ -10,6 +10,7 @@ interface Props {
   name: string;
   paths: string[];
   scope: Scope;
+  projectPath?: string;
   drift: DriftReportDto | null | undefined;
   disabled?: boolean;
   onUninstall?: () => void;
@@ -25,12 +26,14 @@ export default function DetailPane({
   name,
   paths,
   scope,
+  projectPath,
   drift,
   disabled,
   onUninstall,
   onChanged,
   busy,
 }: Props) {
+  const ppFor = (s: Scope) => (s === "global" ? undefined : projectPath);
   const [body, setBody] = useState<UnitBodyDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -41,10 +44,11 @@ export default function DetailPane({
   useEffect(() => {
     setBody(null);
     setErr(null);
-    readUnitBody(scope, agent, unitType as UnitTypeId, name)
+    readUnitBody(scope, agent, unitType as UnitTypeId, name, ppFor(scope))
       .then(setBody)
       .catch((e) => setErr(String(e)));
-  }, [agent, unitType, name, scope]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agent, unitType, name, scope, projectPath]);
 
   useEffect(() => {
     // Keep move-dest default off the current scope when scope changes.
@@ -66,6 +70,7 @@ export default function DetailPane({
         unitType as UnitTypeId,
         name,
         newEnabled,
+        ppFor(scope),
       );
       onChanged?.();
     } catch (e) {
@@ -85,7 +90,9 @@ export default function DetailPane({
     setErr(null);
     setActionBusy(true);
     try {
-      await mvUnit(scope, moveTo, agent, unitType as UnitTypeId, name);
+      // For mv, pass project path if either side is project/local.
+      const pp = scope === "global" && moveTo === "global" ? undefined : projectPath;
+      await mvUnit(scope, moveTo, agent, unitType as UnitTypeId, name, pp);
       onChanged?.();
     } catch (e) {
       const msg = String(e);

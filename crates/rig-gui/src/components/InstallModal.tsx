@@ -5,6 +5,7 @@ import { installUnit } from "../lib/api";
 interface Props {
   agents: AgentDto[];
   scope: Scope;
+  projectPath?: string;
   onClose: () => void;
   onInstalled: () => void;
 }
@@ -14,6 +15,7 @@ const UNIT_TYPES: UnitTypeId[] = ["skill", "rule", "command", "subagent"];
 export default function InstallModal({
   agents,
   scope,
+  projectPath,
   onClose,
   onInstalled,
 }: Props) {
@@ -50,6 +52,7 @@ export default function InstallModal({
         source: source.trim(),
         agents: selectedAgents,
         asType: asType || undefined,
+        projectPath: scope === "global" ? undefined : projectPath,
       });
       const lines: string[] = [];
       for (const u of r.installed) {

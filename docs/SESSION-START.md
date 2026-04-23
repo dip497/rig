@@ -13,35 +13,49 @@ drift-safe sync, and pluggable extension points.
 
 ## Where we are right now
 
-As of `e89b4fc` on `refactor/cross-agent-pivot` (pushed to origin).
+As of `aafd5a2` on `refactor/cross-agent-pivot` (10 commits ahead, not yet pushed).
 
-- **First CLI wedge shipped.** `rig init / install / sync / status
-  / list / uninstall` all work end-to-end. Manifest + lockfile
-  persist at `<scope>/.rig/`.
+- **CLI feature-complete for core flows.** `rig init / install / sync
+  / status / list / uninstall / pack / link / unlink / init-skill /
+  search / stats / doctor / enable / disable / mv` all ship. Manifest
+  + lockfile persist at `<scope>/.rig/`.
 - **Cross-agent thesis proven live.** `rig install local:./skill
   --agent claude,codex` writes into both `~/.claude/` and
   `~/.codex/` with independent per-agent drift tracking.
-- **54 tests pass, clippy clean, zero cross-adapter imports.**
+- **153 tests pass, clippy clean, zero cross-adapter imports.**
   `rig-core` remains zero-I/O (hook-enforced).
-- **Supported matrix right now:**
-  - Claude Code: Skill, Rule, Command, Subagent
-  - Codex: Skill, Rule
-  - MCP / Hook / Plugin: stubbed, return `Unsupported`
-- **Sources:** local only. github / git / npm / marketplace still
-  return `Unsupported`. **Next wedge = github.**
-- **GUI M1 shipped (read-only).** `crates/rig-gui/` is a Tauri 2 +
-  React 19 + Vite 8 + Tailwind 4 dashboard. Agent × scope × unit
-  matrix with drift badges; detail pane shows SHAs + body preview.
-  Seven Tauri commands (`list_agents` / `list_units` / `detect_drift`
-  / `read_unit_body` / `read_manifest` / `read_lockfile` /
-  `scope_roots`). Direct-links `rig-core` + both adapters — no
-  daemon, no `rig-api` RPC yet (ADR-017). Install / uninstall /
-  drift-resolve still CLI-only. `npm run build` + `cargo check` +
-  64 tests all pass; `npm run tauri dev` untested (needs display).
+- **Supported unit-type matrix:**
+  - Claude Code: Skill, Rule, Command, Subagent, **MCP**
+  - Codex: Skill, Rule, Command, Subagent, **MCP** (probe-cached)
+  - Hook / Plugin: stubbed, return `Unsupported`
+- **Sources:** local + tarball (`.rig` / `.tar.gz`) + **HTTP(S)**
+  (`ureq`) + **GitHub** (shell-out to `git`, shallow clone into
+  `~/.rig/cache/`). `git:` / `npm:` / `marketplace:` still stubbed.
+- **Drift resolution live.** `rig sync --on-drift
+  keep|overwrite|diff-per-file|snapshot-then-overwrite|cancel` —
+  never silently overwrites. Default `keep`.
+- **MCP via official CLIs.** `claude mcp add/remove/list/get` +
+  `codex mcp add/remove/list`. Canonical TOML pins drift SHAs.
+  `--scope local` for Claude per-project override (MCP only).
+  Foreign MCP entries hidden from Rig's `list`.
+- **Soft-disable across all unit types.** Skill = frontmatter flag
+  (`disable-model-invocation`); MCP = snapshot + remove; rule /
+  command / subagent = rename trick. Drift scanner normalises out
+  disable edits so disabled units stay `Clean`.
+- **Scope migration.** `rig mv <type>/<name> --to global|project|local`
+  with install_sha preservation + disabled-state preservation +
+  `rig doctor --fix` reconciliation for crash windows.
+- **GUI full dashboard.** Tauri 2 + React 19 + Vite 8 + Tailwind 4.
+  Three tabs (Units / Stats / Doctor). Install modal, sync modal
+  (drift mode picker), enable/disable/mv buttons, search bar (⌘K
+  focus), drift badges, disabled tags. 4 new Tauri commands for
+  sync/search/stats/doctor. Direct-link `rig-core` + both adapters,
+  no daemon (ADR-015). `npm run build` + `cargo check` + 153 tests
+  all green.
 - **Dogfood in place.** `.claude/agents/` has 5 subagents,
   `.claude/skills/` has 4 Rig-specific dev skills,
-  `.claude/settings.json` wires 5 hooks. Hooks firing reliably;
-  skills + subagents used only sparingly — use them more.
+  `.claude/settings.json` wires 5 hooks. Spec-writers used this
+  session for `docs/MCP-SUPPORT.md` + `docs/ENABLE-DISABLE-MV.md`.
 
 ## The 2-minute mental model
 
@@ -105,18 +119,24 @@ All four must pass before merge.
 
 Per ADR-015 we direct-execute. Ordered by value:
 
-1. **Github source** (#24) — `git2` shallow-clone into
-   `~/.rig/cache/<owner>/<repo>@<sha>/`, resolve ref via `ls-remote`.
-   Biggest blocker to real-world use.
-2. **`rig sync` drift resolution** (#7 extension) — currently
-   clobbers. Wire the five modes (keep / overwrite / diff-per-file /
-   snapshot-then-overwrite / cancel).
-3. **MCP + Hook support** — settings.json merge (per-agent). Risky:
-   touches user state. Design careful reconciliation first.
-4. **`rig-api` + `rig-gui`** (#15, #10) — Tauri frontend once the
-   RPC contract is stable. Specs for these go to docs/.
-5. **Bundle composition + SemVer intersection** (#8) — transitive
+1. **Push 10 commits to origin** — branch is 10 ahead of `main`.
+2. **Hook + Plugin support** — only two unit types still stubbed.
+   Hooks need settings.json merge design (risky, touches user state).
+3. **Provider expansion** — asm ships 18 adapters; we have 2. Add
+   Cursor / Windsurf / Aider / Cline / Copilot / Zed etc. Each is a
+   new `rig-adapter-<name>` crate. Use `rig-new-adapter` dogfood skill.
+4. **Security scanner** — pre-install SKILL.md audit for dangerous
+   patterns (shell exec, net, creds, obfuscation). Differentiator.
+5. **Registry + catalog infra** — `rig-registry` public index,
+   `rig publish`, `rig browse`, catalog website.
+6. **GUI polish** — drift resolution diff-per-file UI (CLI-only
+   today), command palette (⌘K unit-jump), dark mode, project
+   folder picker.
+7. **TUI resurrection** (ADR-008 reversal?) — asm's main hook.
+8. **Bundle composition + SemVer intersection** (#8) — transitive
    `bundles = [...]`, conflict diagnostics.
+9. **`rig-api` + daemon** (#15) — stable JSON-RPC so community
+   frontends can land without forking `rig-gui`.
 
 Backfill docs (#11, #12, #13) only when an external reader needs
 them — the code + rustdoc are the current source of truth.

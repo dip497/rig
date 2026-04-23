@@ -9,6 +9,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **GUI: project picker, unit-type filter, scope inheritance view.**
+  "Open project…" folder dialog + recent-projects menu. Unit table
+  gets filter pills (`All/Skill/MCP/Rule/Command/Subagent`) with per-
+  type counts. Scope pill gains "all" option that merges global+
+  project+local with origin badges and shadow indicators; a "Hide
+  global" toggle hides inherited-from-global rows when viewing "all".
 - **GUI: sync / search / stats / doctor.** Three new tabs (Units /
   Stats / Doctor), a search input with Cmd-K focus, and a "Sync"
   button that opens a drift-mode modal (keep / overwrite /
@@ -120,6 +126,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- **README rewritten.** Covers all 16 CLI subcommands, source types,
+  unit types, scopes, drift, and GUI setup.
 - **`rig sync` and `rig install` detect drift; never silently overwrite.**
   New `--on-drift` flag on both commands selects the resolution mode:
   `keep` (default — safest), `overwrite`, `diff-per-file` (unified diff

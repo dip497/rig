@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { statsSummary } from "../lib/api";
-import type { Scope, StatsDto } from "../types";
+import type { Scope, ScopeSelection, StatsDto } from "../types";
 
 interface Props {
-  scope: Scope;
+  scope: ScopeSelection;
+  projectPath?: string;
+  hasProject?: boolean;
 }
 
 function humanBytes(n: number): string {
@@ -13,7 +15,50 @@ function humanBytes(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
-export default function StatsView({ scope }: Props) {
+/** Merge per-agent / per-type stats coming from multiple scopes. */
+function mergeStats(parts: StatsDto[]): StatsDto {
+  const byAgent = new Map<
+    string,
+    { totalCount: number; totalBytes: number; byType: Map<string, { count: number; bytes: number }> }
+  >();
+  let grandCount = 0;
+  let grandBytes = 0;
+  for (const p of parts) {
+    grandCount += p.grandTotalCount;
+    grandBytes += p.grandTotalBytes;
+    for (const a of p.agents) {
+      let entry = byAgent.get(a.agent);
+      if (!entry) {
+        entry = { totalCount: 0, totalBytes: 0, byType: new Map() };
+        byAgent.set(a.agent, entry);
+      }
+      entry.totalCount += a.totalCount;
+      entry.totalBytes += a.totalBytes;
+      for (const t of a.byType) {
+        const prev = entry.byType.get(t.unitType) ?? { count: 0, bytes: 0 };
+        prev.count += t.count;
+        prev.bytes += t.bytes;
+        entry.byType.set(t.unitType, prev);
+      }
+    }
+  }
+  return {
+    grandTotalCount: grandCount,
+    grandTotalBytes: grandBytes,
+    agents: [...byAgent.entries()].map(([agent, e]) => ({
+      agent,
+      totalCount: e.totalCount,
+      totalBytes: e.totalBytes,
+      byType: [...e.byType.entries()].map(([unitType, v]) => ({
+        unitType,
+        count: v.count,
+        bytes: v.bytes,
+      })),
+    })),
+  };
+}
+
+export default function StatsView({ scope, projectPath, hasProject }: Props) {
   const [stats, setStats] = useState<StatsDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -22,9 +67,29 @@ export default function StatsView({ scope }: Props) {
     let live = true;
     setLoading(true);
     setErr(null);
-    statsSummary(scope)
-      .then((s) => {
-        if (live) setStats(s);
+
+    const scopes: Scope[] =
+      scope === "all"
+        ? hasProject
+          ? ["global", "project", "local"]
+          : ["global"]
+        : (scope === "project" || scope === "local") && !hasProject
+          ? []
+          : [scope as Scope];
+
+    if (scopes.length === 0) {
+      setStats({ agents: [], grandTotalCount: 0, grandTotalBytes: 0 });
+      setLoading(false);
+      return;
+    }
+
+    Promise.all(
+      scopes.map((s) =>
+        statsSummary(s, s === "global" ? undefined : projectPath),
+      ),
+    )
+      .then((parts) => {
+        if (live) setStats(mergeStats(parts));
       })
       .catch((e) => {
         if (live) setErr(String(e));
@@ -35,7 +100,7 @@ export default function StatsView({ scope }: Props) {
     return () => {
       live = false;
     };
-  }, [scope]);
+  }, [scope, projectPath, hasProject]);
 
   if (loading) {
     return <div className="p-4 text-sm text-slate-500">Loading stats…</div>;

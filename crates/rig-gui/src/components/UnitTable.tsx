@@ -1,18 +1,24 @@
-import type { DriftReportDto, InstalledUnitDto } from "../types";
+import type { DriftReportDto, InstalledUnitDto, Scope } from "../types";
 import DriftBadge from "./DriftBadge";
 
 export interface UnitRow extends InstalledUnitDto {
   drift?: DriftReportDto | null;
+  /** Present when scope="all": which scope this row actually lives in. */
+  origin?: Scope;
+  /** True when this row is shadowed by a higher-precedence scope. */
+  shadowed?: boolean;
 }
 
 export default function UnitTable({
   rows,
   onSelect,
   selectedKey,
+  showOrigin,
 }: {
   rows: UnitRow[];
   onSelect: (u: UnitRow) => void;
   selectedKey: string | null;
+  showOrigin?: boolean;
 }) {
   if (rows.length === 0) {
     return (
@@ -41,19 +47,29 @@ export default function UnitTable({
         </thead>
         <tbody>
           {rows.map((r) => {
-            const k = `${r.agent}/${r.unitType}/${r.name}`;
+            const k = `${r.agent}/${r.unitType}/${r.name}/${r.origin ?? ""}`;
             return (
               <tr
                 key={k}
                 onClick={() => onSelect(r)}
                 className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 ${
                   selectedKey === k ? "bg-indigo-50" : ""
-                } ${r.disabled ? "opacity-60" : ""}`}
+                } ${r.disabled || r.shadowed ? "opacity-60" : ""}`}
               >
                 <td className="px-3 py-2 font-mono text-xs">{r.agent}</td>
                 <td className="px-3 py-2 font-mono text-xs">{r.unitType}</td>
                 <td className="px-3 py-2 font-medium">
                   {r.name}
+                  {showOrigin && r.origin ? (
+                    <span className="ml-2 rounded bg-slate-100 px-1 text-xs text-slate-600">
+                      [{r.origin}]
+                    </span>
+                  ) : null}
+                  {r.shadowed ? (
+                    <span className="ml-2 text-xs italic text-slate-500">
+                      (shadowed by project)
+                    </span>
+                  ) : null}
                   {r.disabled ? (
                     <span className="ml-2 rounded bg-slate-100 px-1 text-xs text-slate-500">
                       [disabled]

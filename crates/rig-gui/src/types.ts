@@ -2,6 +2,7 @@
 // Keep in sync when Rust side changes.
 
 export type Scope = "global" | "project" | "local";
+export type ScopeSelection = Scope | "all";
 
 export type UnitTypeId =
   | "skill"

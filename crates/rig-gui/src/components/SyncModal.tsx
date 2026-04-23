@@ -4,6 +4,7 @@ import type { Scope, SyncResultDto } from "../types";
 
 interface Props {
   scope: Scope;
+  projectPath?: string;
   onClose: () => void;
   onDone: () => void;
 }
@@ -21,7 +22,7 @@ const MODES: { id: Mode; label: string; desc: string }[] = [
   { id: "cancel", label: "cancel", desc: "Abort on first drift." },
 ];
 
-export default function SyncModal({ scope, onClose, onDone }: Props) {
+export default function SyncModal({ scope, projectPath, onClose, onDone }: Props) {
   const [mode, setMode] = useState<Mode>("keep");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -32,7 +33,11 @@ export default function SyncModal({ scope, onClose, onDone }: Props) {
     setErr(null);
     setRes(null);
     try {
-      const r = await syncScope(scope, mode);
+      const r = await syncScope(
+        scope,
+        mode,
+        scope === "global" ? undefined : projectPath,
+      );
       setRes(r);
       onDone();
     } catch (e) {

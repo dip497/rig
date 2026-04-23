@@ -4,6 +4,7 @@ import type {
   DriftReportDto,
   InstalledUnitDto,
   Scope,
+  ScopeSelection,
   UnitTypeId,
 } from "./types";
 import {
@@ -13,6 +14,12 @@ import {
   searchUnits,
   uninstallUnit,
 } from "./lib/api";
+import {
+  getCurrentProject,
+  mergeAcrossScopes,
+  setCurrentProject,
+  type OriginTaggedUnit,
+} from "./lib/project";
 import Sidebar from "./components/Sidebar";
 import UnitTable, { type UnitRow } from "./components/UnitTable";
 import DetailPane from "./components/DetailPane";
@@ -21,15 +28,43 @@ import InstallModal from "./components/InstallModal";
 import SyncModal from "./components/SyncModal";
 import StatsView from "./components/StatsView";
 import DoctorView from "./components/DoctorView";
+import ProjectPicker from "./components/ProjectPicker";
+import TypeFilterPills, {
+  PILL_TYPES,
+  type TypeFilter,
+} from "./components/TypeFilter";
 
 type View = "units" | "stats" | "doctor";
 
+const LS_TYPE_FILTER = "rig-gui.unit-type-filter";
+const LS_HIDE_GLOBAL = "rig-gui.hide-global";
+
+function readLs(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem(key) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+function writeLs(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // ignore
+  }
+}
+
 export default function App() {
   const [agents, setAgents] = useState<AgentDto[]>([]);
-  const [scope, setScope] = useState<Scope>("global");
+  const [projectPath, setProjectPathState] = useState<string | null>(
+    getCurrentProject(),
+  );
+  const [scope, setScope] = useState<ScopeSelection>(() =>
+    getCurrentProject() ? "all" : "global",
+  );
   const [view, setView] = useState<View>("units");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
-  const [units, setUnits] = useState<InstalledUnitDto[]>([]);
+  const [units, setUnits] = useState<OriginTaggedUnit[]>([]);
   const [drifts, setDrifts] = useState<
     Record<string, DriftReportDto | null>
   >({});
@@ -41,9 +76,41 @@ export default function App() {
   const [busyUninstall, setBusyUninstall] = useState(false);
   const [query, setQuery] = useState("");
   const [banner, setBanner] = useState<string | null>(null);
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>(() => {
+    const v = readLs(LS_TYPE_FILTER, "all") as TypeFilter;
+    return PILL_TYPES.includes(v) ? v : "all";
+  });
+  const [hideGlobal, setHideGlobal] = useState<boolean>(
+    () => readLs(LS_HIDE_GLOBAL, "false") === "true",
+  );
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // Debounced search effect.
+  const setProjectPath = useCallback((p: string | null) => {
+    setCurrentProject(p);
+    setProjectPathState(p);
+    // If the user just cleared the project, fall back to global scope.
+    if (!p) {
+      setScope((cur) => (cur === "global" ? cur : "global"));
+    }
+  }, []);
+
+  const hasProject = !!projectPath;
+  const needsProjectBanner =
+    (scope === "project" || scope === "local" || scope === "all") && !hasProject
+      ? "Open a project to view project-scoped units."
+      : null;
+
+  // Resolve which underlying scopes to query.
+  const scopesToQuery: Scope[] = useMemo(() => {
+    if (scope === "all") {
+      if (!hasProject) return ["global"];
+      return ["global", "project", "local"];
+    }
+    if ((scope === "project" || scope === "local") && !hasProject) return [];
+    return [scope];
+  }, [scope, hasProject]);
+
+  // Load units whenever scope / project / query changes.
   useEffect(() => {
     if (view !== "units") return;
     let cancelled = false;
@@ -51,10 +118,21 @@ export default function App() {
     const handle = window.setTimeout(
       async () => {
         try {
-          const us = trimmed
-            ? await searchUnits(scope, trimmed)
-            : await listUnits(scope);
-          if (!cancelled) setUnits(us);
+          if (scopesToQuery.length === 0) {
+            if (!cancelled) setUnits([]);
+            return;
+          }
+          const perScope = await Promise.all(
+            scopesToQuery.map(async (s) => {
+              const pp = s === "global" ? undefined : projectPath ?? undefined;
+              const us: InstalledUnitDto[] = trimmed
+                ? await searchUnits(s, trimmed, pp)
+                : await listUnits(s, pp);
+              return { scope: s, units: us };
+            }),
+          );
+          const merged = mergeAcrossScopes(perScope);
+          if (!cancelled) setUnits(merged);
         } catch (e) {
           if (!cancelled) setError(String(e));
         }
@@ -65,28 +143,43 @@ export default function App() {
       cancelled = true;
       window.clearTimeout(handle);
     };
-  }, [query, scope, view]);
+  }, [query, scope, view, projectPath, scopesToQuery]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [ag, us] = await Promise.all([
-        listAgents(),
-        query.trim() ? searchUnits(scope, query.trim()) : listUnits(scope),
-      ]);
+      const ag = await listAgents();
       setAgents(ag);
-      setUnits(us);
+      if (scopesToQuery.length === 0) {
+        setUnits([]);
+        setDrifts({});
+        return;
+      }
+      const trimmed = query.trim();
+      const perScope = await Promise.all(
+        scopesToQuery.map(async (s) => {
+          const pp = s === "global" ? undefined : projectPath ?? undefined;
+          const us: InstalledUnitDto[] = trimmed
+            ? await searchUnits(s, trimmed, pp)
+            : await listUnits(s, pp);
+          return { scope: s, units: us };
+        }),
+      );
+      const merged = mergeAcrossScopes(perScope);
+      setUnits(merged);
       const d: Record<string, DriftReportDto | null> = {};
       await Promise.all(
-        us.map(async (u) => {
-          const k = `${u.agent}/${u.unitType}/${u.name}`;
+        merged.map(async (u) => {
+          const k = `${u.agent}/${u.unitType}/${u.name}/${u.origin}`;
           try {
+            const pp = u.origin === "global" ? undefined : projectPath ?? undefined;
             d[k] = await detectDrift(
-              scope,
+              u.origin,
               u.agent,
               u.unitType as UnitTypeId,
               u.name,
+              pp,
             );
           } catch {
             d[k] = null;
@@ -99,12 +192,19 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [scope, query]);
+  }, [scopesToQuery, projectPath, query]);
 
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope]);
+  }, [scope, projectPath]);
+
+  useEffect(() => {
+    writeLs(LS_TYPE_FILTER, typeFilter);
+  }, [typeFilter]);
+  useEffect(() => {
+    writeLs(LS_HIDE_GLOBAL, hideGlobal ? "true" : "false");
+  }, [hideGlobal]);
 
   useEffect(() => {
     if (!banner) return;
@@ -141,29 +241,69 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [refresh, view]);
 
+  // Apply agent + type + hideGlobal filters.
+  const filteredUnits = useMemo(() => {
+    return units.filter((u) => {
+      if (selectedAgent && u.agent !== selectedAgent) return false;
+      if (typeFilter !== "all" && u.unitType !== typeFilter) return false;
+      if (scope === "all" && hideGlobal && u.origin === "global") return false;
+      return true;
+    });
+  }, [units, selectedAgent, typeFilter, scope, hideGlobal]);
+
+  // Per-type counts (respecting agent + hideGlobal filters; ignores typeFilter).
+  const typeCounts = useMemo(() => {
+    const pool = units.filter((u) => {
+      if (selectedAgent && u.agent !== selectedAgent) return false;
+      if (scope === "all" && hideGlobal && u.origin === "global") return false;
+      return true;
+    });
+    const counts: Record<TypeFilter, number> = {
+      all: pool.length,
+      skill: 0,
+      mcp: 0,
+      rule: 0,
+      command: 0,
+      subagent: 0,
+    };
+    for (const u of pool) {
+      const t = u.unitType as TypeFilter;
+      if (t in counts && t !== "all") counts[t] = (counts[t] ?? 0) + 1;
+    }
+    return counts;
+  }, [units, selectedAgent, scope, hideGlobal]);
+
   const rows: UnitRow[] = useMemo(
     () =>
-      units
-        .filter((u) => !selectedAgent || u.agent === selectedAgent)
-        .map((u) => ({
-          ...u,
-          drift: drifts[`${u.agent}/${u.unitType}/${u.name}`] ?? null,
-        })),
-    [units, selectedAgent, drifts],
+      filteredUnits.map((u) => ({
+        ...u,
+        drift: drifts[`${u.agent}/${u.unitType}/${u.name}/${u.origin}`] ?? null,
+      })),
+    [filteredUnits, drifts],
   );
 
   const selectedKey = selected
-    ? `${selected.agent}/${selected.unitType}/${selected.name}`
+    ? `${selected.agent}/${selected.unitType}/${selected.name}/${selected.origin ?? ""}`
     : null;
 
   const tabClass = (v: View) =>
     `px-3 py-1 rounded text-sm ${view === v ? "bg-slate-900 text-white" : "hover:bg-slate-100 text-slate-700"}`;
+
+  // Effective scope to pass to modals / detail / sub-views. For scope="all"
+  // we default these to the project scope when a project is open, else global.
+  const effectiveScope: Scope =
+    scope === "all"
+      ? hasProject
+        ? "project"
+        : "global"
+      : (scope as Scope);
 
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2">
         <div className="flex items-center gap-3">
           <div className="text-lg font-bold tracking-tight">Rig</div>
+          <ProjectPicker current={projectPath} onPick={setProjectPath} />
           <nav className="flex items-center gap-1">
             <button className={tabClass("units")} onClick={() => setView("units")}>
               Units
@@ -177,7 +317,17 @@ export default function App() {
           </nav>
         </div>
         <div className="flex items-center gap-3">
-          <ScopePill scope={scope} onChange={setScope} />
+          <ScopePill scope={scope} onChange={setScope} hasProject={hasProject} />
+          {scope === "all" && hasProject && (
+            <label className="flex items-center gap-1 text-xs text-slate-600">
+              <input
+                type="checkbox"
+                checked={hideGlobal}
+                onChange={(e) => setHideGlobal(e.target.checked)}
+              />
+              Hide global
+            </label>
+          )}
           {view === "units" && (
             <>
               <input
@@ -210,6 +360,12 @@ export default function App() {
         </div>
       </header>
 
+      {needsProjectBanner && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          {needsProjectBanner}
+        </div>
+      )}
+
       {banner && (
         <div className="border-b border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800 cursor-pointer"
              onClick={() => setBanner(null)}>
@@ -220,7 +376,8 @@ export default function App() {
       {showInstall && (
         <InstallModal
           agents={agents}
-          scope={scope}
+          scope={effectiveScope}
+          projectPath={projectPath ?? undefined}
           onClose={() => setShowInstall(false)}
           onInstalled={refresh}
         />
@@ -228,7 +385,8 @@ export default function App() {
 
       {showSync && (
         <SyncModal
-          scope={scope}
+          scope={effectiveScope}
+          projectPath={projectPath ?? undefined}
           onClose={() => setShowSync(false)}
           onDone={() => {
             setBanner("Sync complete.");
@@ -251,10 +409,16 @@ export default function App() {
             onSelect={setSelectedAgent}
           />
           <main className="flex-1 overflow-auto bg-white">
+            <TypeFilterPills
+              selected={typeFilter}
+              counts={typeCounts}
+              onChange={setTypeFilter}
+            />
             <UnitTable
               rows={rows}
               onSelect={setSelected}
               selectedKey={selectedKey}
+              showOrigin={scope === "all"}
             />
           </main>
           {selected && (
@@ -263,7 +427,8 @@ export default function App() {
               unitType={selected.unitType}
               name={selected.name}
               paths={selected.paths}
-              scope={scope}
+              scope={selected.origin ?? effectiveScope}
+              projectPath={projectPath ?? undefined}
               drift={selected.drift}
               disabled={selected.disabled}
               busy={busyUninstall}
@@ -276,11 +441,14 @@ export default function App() {
                 setBusyUninstall(true);
                 setError(null);
                 try {
+                  const unitScope = selected.origin ?? effectiveScope;
+                  const pp = unitScope === "global" ? undefined : projectPath ?? undefined;
                   await uninstallUnit(
-                    scope,
+                    unitScope,
                     selected.agent,
                     selected.unitType as UnitTypeId,
                     selected.name,
+                    pp,
                   );
                   setSelected(null);
                   await refresh();
@@ -297,13 +465,21 @@ export default function App() {
 
       {view === "stats" && (
         <main className="flex-1 overflow-auto bg-white">
-          <StatsView scope={scope} />
+          <StatsView
+            scope={scope}
+            projectPath={projectPath ?? undefined}
+            hasProject={hasProject}
+          />
         </main>
       )}
 
       {view === "doctor" && (
         <main className="flex-1 overflow-auto bg-white">
-          <DoctorView scope={scope} />
+          <DoctorView
+            scope={scope}
+            projectPath={projectPath ?? undefined}
+            hasProject={hasProject}
+          />
         </main>
       )}
     </div>

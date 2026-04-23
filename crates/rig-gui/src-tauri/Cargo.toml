@@ -26,6 +26,7 @@ rig-source = { workspace = true }
 rig-adapter-claude = { workspace = true }
 rig-adapter-codex = { workspace = true }
 tauri = { workspace = true }
+tauri-plugin-dialog = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

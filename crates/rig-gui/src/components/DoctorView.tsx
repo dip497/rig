@@ -1,16 +1,37 @@
 import { useCallback, useEffect, useState } from "react";
 import { doctorScan } from "../lib/api";
-import type { DoctorResultDto, Scope } from "../types";
+import type { DoctorResultDto, Scope, ScopeSelection } from "../types";
 
 interface Props {
-  scope: Scope;
+  scope: ScopeSelection;
+  projectPath?: string;
+  hasProject?: boolean;
 }
 
-export default function DoctorView({ scope }: Props) {
+function mergeDoctor(parts: DoctorResultDto[]): DoctorResultDto {
+  return {
+    duplicates: parts.flatMap((p) => p.duplicates),
+    brokenSymlinks: parts.flatMap((p) => p.brokenSymlinks),
+    mvSplit: parts.flatMap((p) => p.mvSplit),
+    mvStaleLock: parts.flatMap((p) => p.mvStaleLock),
+    fixed: parts.reduce((a, p) => a + p.fixed, 0),
+  };
+}
+
+export default function DoctorView({ scope, projectPath, hasProject }: Props) {
   const [res, setRes] = useState<DoctorResultDto | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [fixing, setFixing] = useState(false);
+
+  const effectiveScopes: Scope[] =
+    scope === "all"
+      ? hasProject
+        ? ["global", "project", "local"]
+        : ["global"]
+      : (scope === "project" || scope === "local") && !hasProject
+        ? []
+        : [scope as Scope];
 
   const scan = useCallback(
     async (fix: boolean) => {
@@ -18,8 +39,16 @@ export default function DoctorView({ scope }: Props) {
       else setLoading(true);
       setErr(null);
       try {
-        const r = await doctorScan(scope, fix);
-        setRes(r);
+        if (effectiveScopes.length === 0) {
+          setRes({ duplicates: [], brokenSymlinks: [], mvSplit: [], mvStaleLock: [], fixed: 0 });
+          return;
+        }
+        const parts = await Promise.all(
+          effectiveScopes.map((s) =>
+            doctorScan(s, fix, s === "global" ? undefined : projectPath),
+          ),
+        );
+        setRes(mergeDoctor(parts));
       } catch (e) {
         setErr(String(e));
       } finally {
@@ -27,7 +56,8 @@ export default function DoctorView({ scope }: Props) {
         setFixing(false);
       }
     },
-    [scope],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scope, projectPath, hasProject],
   );
 
   useEffect(() => {
