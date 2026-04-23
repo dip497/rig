@@ -1,4 +1,5 @@
 import type { ScopeSelection } from "../types";
+import Pill from "./Pill";
 
 interface Props {
   scope: ScopeSelection;
@@ -11,24 +12,20 @@ const OPTIONS: ScopeSelection[] = ["global", "project", "local", "all"];
 
 export default function ScopePill({ scope, onChange, hasProject }: Props) {
   return (
-    <div className="inline-flex rounded-md border border-slate-300 bg-white text-sm shadow-sm">
+    <div className="inline-flex items-center gap-1">
       {OPTIONS.map((s) => {
         const needsProject = s !== "global";
         const disabled = needsProject && !hasProject;
         return (
-          <button
+          <Pill
             key={s}
-            onClick={() => !disabled && onChange(s)}
+            active={scope === s}
             disabled={disabled}
             title={disabled ? "Open a project to use this scope" : undefined}
-            className={`px-3 py-1 first:rounded-l-md last:rounded-r-md ${
-              scope === s
-                ? "bg-indigo-600 text-white"
-                : "text-slate-700 hover:bg-slate-50"
-            } ${disabled ? "cursor-not-allowed opacity-40 hover:bg-white" : ""}`}
+            onClick={() => onChange(s)}
           >
             {s}
-          </button>
+          </Pill>
         );
       })}
     </div>

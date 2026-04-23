@@ -1,3 +1,5 @@
+import Pill from "./Pill";
+
 export type TypeFilter =
   | "all"
   | "skill"
@@ -26,21 +28,18 @@ export default function TypeFilterPills({
   onChange: (t: TypeFilter) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-1 border-b border-slate-200 bg-slate-50 px-3 py-2">
+    <div className="flex flex-wrap items-center gap-1">
       {PILL_TYPES.map((t) => {
         const n = counts[t] ?? 0;
         const active = selected === t;
         const dim = n === 0 && !active;
         return (
-          <button
-            key={t}
-            onClick={() => onChange(t)}
-            className={`rounded-full px-3 py-0.5 text-xs capitalize transition ${
-              active ? "bg-slate-900 text-white" : "hover:bg-slate-100 text-slate-700"
-            } ${dim ? "opacity-50" : ""}`}
-          >
-            {t} ({n})
-          </button>
+          <span key={t} className={dim ? "opacity-50" : ""}>
+            <Pill active={active} onClick={() => onChange(t)}>
+              <span className="capitalize">{t}</span>
+              <span className="ml-1 text-xs opacity-70">({n})</span>
+            </Pill>
+          </span>
         );
       })}
     </div>

@@ -126,6 +126,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- **GUI layout polish.** Header split into two rows (app-level and
+  view-level); tabs on their own row. Sidebar removed — agent filter
+  now lives alongside unit-type filter pills. Shared `Pill` component
+  for visual consistency. Empty state added with contextual CTAs.
 - **README rewritten.** Covers all 16 CLI subcommands, source types,
   unit types, scopes, drift, and GUI setup.
 - **`rig sync` and `rig install` detect drift; never silently overwrite.**

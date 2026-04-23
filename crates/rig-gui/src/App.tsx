@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   AgentDto,
   DriftReportDto,
@@ -20,7 +21,8 @@ import {
   setCurrentProject,
   type OriginTaggedUnit,
 } from "./lib/project";
-import Sidebar from "./components/Sidebar";
+// Sidebar intentionally unmounted — agent filter now lives inline as pills.
+// The file is kept on disk for possible re-introduction.
 import UnitTable, { type UnitRow } from "./components/UnitTable";
 import DetailPane from "./components/DetailPane";
 import ScopePill from "./components/ScopePill";
@@ -29,6 +31,7 @@ import SyncModal from "./components/SyncModal";
 import StatsView from "./components/StatsView";
 import DoctorView from "./components/DoctorView";
 import ProjectPicker from "./components/ProjectPicker";
+import Pill from "./components/Pill";
 import TypeFilterPills, {
   PILL_TYPES,
   type TypeFilter,
@@ -38,6 +41,7 @@ type View = "units" | "stats" | "doctor";
 
 const LS_TYPE_FILTER = "rig-gui.unit-type-filter";
 const LS_HIDE_GLOBAL = "rig-gui.hide-global";
+const LS_AGENT_FILTER = "rig-gui.agent-filter";
 
 function readLs(key: string, fallback: string): string {
   try {
@@ -54,6 +58,14 @@ function writeLs(key: string, value: string) {
   }
 }
 
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="text-slate-400 text-[10px] border border-slate-200 rounded px-1 ml-2">
+      {children}
+    </kbd>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<AgentDto[]>([]);
   const [projectPath, setProjectPathState] = useState<string | null>(
@@ -63,7 +75,10 @@ export default function App() {
     getCurrentProject() ? "all" : "global",
   );
   const [view, setView] = useState<View>("units");
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(() => {
+    const v = readLs(LS_AGENT_FILTER, "");
+    return v === "" ? null : v;
+  });
   const [units, setUnits] = useState<OriginTaggedUnit[]>([]);
   const [drifts, setDrifts] = useState<
     Record<string, DriftReportDto | null>
@@ -88,7 +103,6 @@ export default function App() {
   const setProjectPath = useCallback((p: string | null) => {
     setCurrentProject(p);
     setProjectPathState(p);
-    // If the user just cleared the project, fall back to global scope.
     if (!p) {
       setScope((cur) => (cur === "global" ? cur : "global"));
     }
@@ -100,7 +114,6 @@ export default function App() {
       ? "Open a project to view project-scoped units."
       : null;
 
-  // Resolve which underlying scopes to query.
   const scopesToQuery: Scope[] = useMemo(() => {
     if (scope === "all") {
       if (!hasProject) return ["global"];
@@ -110,7 +123,6 @@ export default function App() {
     return [scope];
   }, [scope, hasProject]);
 
-  // Load units whenever scope / project / query changes.
   useEffect(() => {
     if (view !== "units") return;
     let cancelled = false;
@@ -205,6 +217,9 @@ export default function App() {
   useEffect(() => {
     writeLs(LS_HIDE_GLOBAL, hideGlobal ? "true" : "false");
   }, [hideGlobal]);
+  useEffect(() => {
+    writeLs(LS_AGENT_FILTER, selectedAgent ?? "");
+  }, [selectedAgent]);
 
   useEffect(() => {
     if (!banner) return;
@@ -241,7 +256,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [refresh, view]);
 
-  // Apply agent + type + hideGlobal filters.
   const filteredUnits = useMemo(() => {
     return units.filter((u) => {
       if (selectedAgent && u.agent !== selectedAgent) return false;
@@ -251,7 +265,6 @@ export default function App() {
     });
   }, [units, selectedAgent, typeFilter, scope, hideGlobal]);
 
-  // Per-type counts (respecting agent + hideGlobal filters; ignores typeFilter).
   const typeCounts = useMemo(() => {
     const pool = units.filter((u) => {
       if (selectedAgent && u.agent !== selectedAgent) return false;
@@ -286,11 +299,6 @@ export default function App() {
     ? `${selected.agent}/${selected.unitType}/${selected.name}/${selected.origin ?? ""}`
     : null;
 
-  const tabClass = (v: View) =>
-    `px-3 py-1 rounded text-sm ${view === v ? "bg-slate-900 text-white" : "hover:bg-slate-100 text-slate-700"}`;
-
-  // Effective scope to pass to modals / detail / sub-views. For scope="all"
-  // we default these to the project scope when a project is open, else global.
   const effectiveScope: Scope =
     scope === "all"
       ? hasProject
@@ -298,67 +306,125 @@ export default function App() {
         : "global"
       : (scope as Scope);
 
+  const openProjectPicker = useCallback(async () => {
+    try {
+      const result = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Open project",
+      });
+      if (typeof result === "string") setProjectPath(result);
+    } catch (e) {
+      console.error("open project failed:", e);
+    }
+  }, [setProjectPath]);
+
+  const clearFilters = useCallback(() => {
+    setTypeFilter("all");
+    setSelectedAgent(null);
+    setQuery("");
+  }, []);
+
+  const emptyKind =
+    scope !== "global" && !hasProject ? "no-project" : "no-match";
+
   return (
     <div className="flex h-screen flex-col">
+      {/* Row 1 — app-level */}
       <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2">
         <div className="flex items-center gap-3">
           <div className="text-lg font-bold tracking-tight">Rig</div>
           <ProjectPicker current={projectPath} onPick={setProjectPath} />
-          <nav className="flex items-center gap-1">
-            <button className={tabClass("units")} onClick={() => setView("units")}>
-              Units
-            </button>
-            <button className={tabClass("stats")} onClick={() => setView("stats")}>
-              Stats
-            </button>
-            <button className={tabClass("doctor")} onClick={() => setView("doctor")}>
-              Doctor
-            </button>
-          </nav>
         </div>
-        <div className="flex items-center gap-3">
-          <ScopePill scope={scope} onChange={setScope} hasProject={hasProject} />
-          {scope === "all" && hasProject && (
-            <label className="flex items-center gap-1 text-xs text-slate-600">
-              <input
-                type="checkbox"
-                checked={hideGlobal}
-                onChange={(e) => setHideGlobal(e.target.checked)}
-              />
-              Hide global
-            </label>
-          )}
-          {view === "units" && (
-            <>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={refresh}
+            className="flex items-center rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
+          >
+            {loading ? "Refreshing…" : "Refresh"}
+            <Kbd>⌘R</Kbd>
+          </button>
+        </div>
+      </header>
+
+      {/* Tabs row */}
+      <div className="flex items-center gap-1 border-b border-slate-200 bg-white px-4 py-1.5">
+        <Pill active={view === "units"} onClick={() => setView("units")}>
+          Units
+        </Pill>
+        <Pill active={view === "stats"} onClick={() => setView("stats")}>
+          Stats
+        </Pill>
+        <Pill active={view === "doctor"} onClick={() => setView("doctor")}>
+          Doctor
+        </Pill>
+      </div>
+
+      {/* Row 2 — context / view-level (Units only) */}
+      {view === "units" && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <TypeFilterPills
+              selected={typeFilter}
+              counts={typeCounts}
+              onChange={setTypeFilter}
+            />
+            <div className="h-5 w-px bg-slate-300" />
+            <div className="flex items-center gap-1">
+              <Pill
+                active={selectedAgent === null}
+                onClick={() => setSelectedAgent(null)}
+              >
+                All
+              </Pill>
+              {agents.map((a) => (
+                <Pill
+                  key={a.id}
+                  active={selectedAgent === a.id}
+                  onClick={() => setSelectedAgent(a.id)}
+                >
+                  {a.id}
+                </Pill>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <ScopePill scope={scope} onChange={setScope} hasProject={hasProject} />
+            {scope === "all" && hasProject && (
+              <label className="flex items-center gap-1 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={hideGlobal}
+                  onChange={(e) => setHideGlobal(e.target.checked)}
+                />
+                Hide global
+              </label>
+            )}
+            <div className="flex items-center">
               <input
                 ref={searchRef}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search (⌘K)"
+                placeholder="Search"
                 className="rounded border border-slate-300 px-2 py-1 text-sm w-48"
               />
-              <button
-                onClick={() => setShowSync(true)}
-                className="rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
-              >
-                Sync
-              </button>
-              <button
-                onClick={() => setShowInstall(true)}
-                className="rounded bg-indigo-600 px-3 py-1 text-sm text-white shadow-sm hover:bg-indigo-700"
-              >
-                + Install
-              </button>
-              <button
-                onClick={refresh}
-                className="rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
-              >
-                {loading ? "Refreshing…" : "Refresh (⌘R)"}
-              </button>
-            </>
-          )}
+              <Kbd>⌘K</Kbd>
+            </div>
+            <button
+              onClick={() => setShowSync(true)}
+              className="rounded border border-slate-300 bg-white px-3 py-1 text-sm shadow-sm hover:bg-slate-50"
+            >
+              Sync
+            </button>
+            <button
+              onClick={() => setShowInstall(true)}
+              className="rounded bg-indigo-600 px-3 py-1 text-sm text-white shadow-sm hover:bg-indigo-700"
+            >
+              + Install
+            </button>
+          </div>
         </div>
-      </header>
+      )}
 
       {needsProjectBanner && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
@@ -367,8 +433,10 @@ export default function App() {
       )}
 
       {banner && (
-        <div className="border-b border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800 cursor-pointer"
-             onClick={() => setBanner(null)}>
+        <div
+          className="border-b border-green-200 bg-green-50 px-4 py-2 text-sm text-green-800 cursor-pointer"
+          onClick={() => setBanner(null)}
+        >
           {banner}
         </div>
       )}
@@ -403,22 +471,15 @@ export default function App() {
 
       {view === "units" && (
         <div className="flex flex-1 overflow-hidden">
-          <Sidebar
-            agents={agents}
-            selected={selectedAgent}
-            onSelect={setSelectedAgent}
-          />
           <main className="flex-1 overflow-auto bg-white">
-            <TypeFilterPills
-              selected={typeFilter}
-              counts={typeCounts}
-              onChange={setTypeFilter}
-            />
             <UnitTable
               rows={rows}
               onSelect={setSelected}
               selectedKey={selectedKey}
               showOrigin={scope === "all"}
+              emptyKind={emptyKind}
+              onOpenProject={openProjectPicker}
+              onClearFilters={clearFilters}
             />
           </main>
           {selected && (
@@ -437,12 +498,18 @@ export default function App() {
                 await refresh();
               }}
               onUninstall={async () => {
-                if (!confirm(`Uninstall ${selected.unitType}/${selected.name} from ${selected.agent}?`)) return;
+                if (
+                  !confirm(
+                    `Uninstall ${selected.unitType}/${selected.name} from ${selected.agent}?`,
+                  )
+                )
+                  return;
                 setBusyUninstall(true);
                 setError(null);
                 try {
                   const unitScope = selected.origin ?? effectiveScope;
-                  const pp = unitScope === "global" ? undefined : projectPath ?? undefined;
+                  const pp =
+                    unitScope === "global" ? undefined : projectPath ?? undefined;
                   await uninstallUnit(
                     unitScope,
                     selected.agent,
