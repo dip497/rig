@@ -95,6 +95,66 @@ pub struct MvResultDto {
     pub disabled: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncResultDto {
+    pub installed: Vec<InstalledUnitDto>,
+    pub skipped: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypeStatsDto {
+    pub unit_type: String,
+    pub count: u64,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatsDto {
+    pub agent: String,
+    pub by_type: Vec<TypeStatsDto>,
+    pub total_count: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsDto {
+    pub agents: Vec<AgentStatsDto>,
+    pub grand_total_count: u64,
+    pub grand_total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateLocationDto {
+    pub agent: String,
+    pub scope: Scope,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateDto {
+    pub unit_type: String,
+    pub name: String,
+    pub locations: Vec<DuplicateLocationDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorResultDto {
+    pub duplicates: Vec<DuplicateDto>,
+    pub broken_symlinks: Vec<String>,
+    pub mv_split: Vec<String>,
+    pub mv_stale_lock: Vec<String>,
+    pub fixed: u32,
+}
+
 pub fn unit_type_slug(t: UnitType) -> &'static str {
     match t {
         UnitType::Skill => "skill",

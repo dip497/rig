@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentDto,
+  DoctorResultDto,
   DriftReportDto,
   InstallResultDto,
   InstalledUnitDto,
@@ -9,6 +10,8 @@ import type {
   MvResultDto,
   Scope,
   ScopeRootsDto,
+  StatsDto,
+  SyncResultDto,
   UnitBodyDto,
   UnitTypeId,
 } from "../types";
@@ -110,6 +113,18 @@ export const isEnabled = (
     unitType,
     name,
   });
+
+export const syncScope = (scope: Scope, onDrift: string, projectPath?: string) =>
+  invoke<SyncResultDto>("sync_scope", { scope, onDrift, projectPath });
+
+export const searchUnits = (scope: Scope, query: string, projectPath?: string) =>
+  invoke<InstalledUnitDto[]>("search_units", { scope, query, projectPath });
+
+export const statsSummary = (scope: Scope, projectPath?: string) =>
+  invoke<StatsDto>("stats_summary", { scope, projectPath });
+
+export const doctorScan = (scope: Scope, fix: boolean, projectPath?: string) =>
+  invoke<DoctorResultDto>("doctor_scan", { scope, fix, projectPath });
 
 export const mvUnit = (
   fromScope: Scope,

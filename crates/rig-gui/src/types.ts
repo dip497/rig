@@ -78,3 +78,49 @@ export interface MvResultDto {
   installSha: string;
   disabled: boolean;
 }
+
+export interface SyncResultDto {
+  installed: InstalledUnitDto[];
+  skipped: string[];
+  conflicts: string[];
+  cancelled: boolean;
+}
+
+export interface TypeStatsDto {
+  unitType: string;
+  count: number;
+  bytes: number;
+}
+
+export interface AgentStatsDto {
+  agent: string;
+  byType: TypeStatsDto[];
+  totalCount: number;
+  totalBytes: number;
+}
+
+export interface StatsDto {
+  agents: AgentStatsDto[];
+  grandTotalCount: number;
+  grandTotalBytes: number;
+}
+
+export interface DuplicateLocationDto {
+  agent: string;
+  scope: Scope;
+  path: string;
+}
+
+export interface DuplicateDto {
+  unitType: string;
+  name: string;
+  locations: DuplicateLocationDto[];
+}
+
+export interface DoctorResultDto {
+  duplicates: DuplicateDto[];
+  brokenSymlinks: string[];
+  mvSplit: string[];
+  mvStaleLock: string[];
+  fixed: number;
+}

@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- **GUI: sync / search / stats / doctor.** Three new tabs (Units /
+  Stats / Doctor), a search input with Cmd-K focus, and a "Sync"
+  button that opens a drift-mode modal (keep / overwrite /
+  snapshot-then-overwrite / cancel; diff-per-file is CLI-only).
+  Stats view surfaces per-agent × per-type counts + disk usage.
+  Doctor view lists duplicates, broken symlinks, and mv-reconcile
+  issues with an auto-fix button.
 - **GUI: enable / disable / mv buttons.** Detail pane now exposes
   toggle for `disable-model-invocation` (skills), rename-trick
   (rule/command/subagent), snapshot+remove (MCP). "Move to…"

@@ -7,6 +7,7 @@
 pub mod dto;
 pub mod state;
 pub mod store;
+pub mod sync;
 
 use std::path::{Path, PathBuf};
 
@@ -21,8 +22,9 @@ use rig_core::unit::{Unit, UnitType};
 use tauri::State;
 
 use crate::dto::{
-    unit_type_slug, AgentDto, DriftReportDto, InstallResultDto, InstalledUnitDto, LockfileDto,
-    ManifestDto, MvResultDto, ScopeDto, ScopeRootsDto, UnitBodyDto, UnitTypeDto,
+    unit_type_slug, AgentDto, DoctorResultDto, DriftReportDto, InstallResultDto, InstalledUnitDto,
+    LockfileDto, ManifestDto, MvResultDto, ScopeDto, ScopeRootsDto, StatsDto, SyncResultDto,
+    UnitBodyDto, UnitTypeDto,
 };
 use crate::state::AppState;
 
@@ -572,6 +574,50 @@ fn lock_entry_name(e: &LockEntry) -> String {
         .to_owned()
 }
 
+#[tauri::command]
+fn sync_scope(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    on_drift: String,
+) -> Result<SyncResultDto, String> {
+    let mode = sync::parse_on_drift(&on_drift)?;
+    let root = project_root(project_path);
+    sync::sync_scope(&state, scope, root.as_deref(), mode)
+}
+
+#[tauri::command]
+fn search_units(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    query: String,
+) -> Result<Vec<InstalledUnitDto>, String> {
+    let root = project_root(project_path);
+    sync::search_units(&state, scope, root.as_deref(), &query)
+}
+
+#[tauri::command]
+fn stats_summary(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+) -> Result<StatsDto, String> {
+    let root = project_root(project_path);
+    sync::stats_summary(&state, scope, root.as_deref())
+}
+
+#[tauri::command]
+fn doctor_scan(
+    state: State<'_, AppState>,
+    scope: ScopeDto,
+    project_path: Option<String>,
+    fix: bool,
+) -> Result<DoctorResultDto, String> {
+    let root = project_root(project_path);
+    sync::doctor_scan(&state, scope, root.as_deref(), fix)
+}
+
 // Silence unused-imports when no test feature picks them up.
 #[allow(dead_code)]
 fn _type_assertions(_: UnitType, _: Scope, _: &dyn Adapter, _: &Path) {}
@@ -593,6 +639,10 @@ pub fn run() {
             set_enabled,
             is_enabled,
             mv_unit,
+            sync_scope,
+            search_units,
+            stats_summary,
+            doctor_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Rig GUI");
@@ -767,6 +817,132 @@ mod tests {
 
         assert!(src_ok, "source should be gone");
         assert!(target_disabled, "disabled state lost across mv");
+    }
+
+    #[test]
+    fn search_units_substring_match_on_name() {
+        let _g = home_guard();
+        let home = setup_home();
+        write_skill(home.path(), "alpha-skill");
+        write_skill(home.path(), "beta-skill");
+
+        let st = AppState::new();
+        let hits = sync::search_units(&st, Scope::Global, None, "alpha").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].name, "alpha-skill");
+
+        // Empty query returns all.
+        let all = sync::search_units(&st, Scope::Global, None, "").unwrap();
+        assert_eq!(all.len(), 2);
+        let _ = home;
+    }
+
+    #[test]
+    fn stats_summary_counts_per_agent_and_type() {
+        let _g = home_guard();
+        let home = setup_home();
+        write_skill(home.path(), "s1");
+        write_skill(home.path(), "s2");
+
+        let st = AppState::new();
+        let stats = sync::stats_summary(&st, Scope::Global, None).unwrap();
+        assert_eq!(stats.grand_total_count, 2);
+        let claude = stats.agents.iter().find(|a| a.agent == "claude").unwrap();
+        assert_eq!(claude.total_count, 2);
+        assert!(claude.total_bytes > 0);
+        let skill_row = claude
+            .by_type
+            .iter()
+            .find(|t| t.unit_type == "skill")
+            .unwrap();
+        assert_eq!(skill_row.count, 2);
+        let _ = home;
+    }
+
+    #[test]
+    fn doctor_scan_detects_duplicate_across_agents() {
+        let _g = home_guard();
+        let home = setup_home();
+        // Same skill name on both claude + codex.
+        write_skill(home.path(), "shared-skill");
+        let codex_dir = home.path().join(".codex/skills/shared-skill");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(
+            codex_dir.join("SKILL.md"),
+            "---\nname: shared-skill\ndescription: dup\n---\n\n# x\n",
+        )
+        .unwrap();
+
+        let st = AppState::new();
+        let res = sync::doctor_scan(&st, Scope::Global, None, false).unwrap();
+        assert_eq!(res.duplicates.len(), 1);
+        assert_eq!(res.duplicates[0].name, "shared-skill");
+        let _ = home;
+    }
+
+    #[test]
+    fn doctor_scan_fix_drops_stale_lock_entry() {
+        let _g = home_guard();
+        let _h = setup_home();
+        let tmp_proj = tempfile::tempdir().unwrap();
+
+        // Lockfile references a skill that doesn't exist on disk.
+        let mut lock = rig_core::lockfile::Lockfile::new();
+        lock.entries.push(LockEntry {
+            id: "skill/local:./ghost".to_owned(),
+            unit_type: UnitType::Skill,
+            source: Source::Local {
+                path: "./ghost".to_owned(),
+            },
+            source_sha: rig_core::source::Sha256::of(b""),
+            install_sha: rig_core::source::Sha256::of(b""),
+            agent: rig_core::agent::AgentId::new("claude"),
+            scope: Scope::Project,
+            path: PathBuf::from(".claude/skills/ghost/SKILL.md"),
+            native_name: None,
+            extra: Default::default(),
+        });
+        store::save_lockfile(Scope::Project, Some(tmp_proj.path()), &lock).unwrap();
+
+        let st = AppState::new();
+        let scan = sync::doctor_scan(&st, Scope::Project, Some(tmp_proj.path()), false).unwrap();
+        assert_eq!(scan.mv_stale_lock.len(), 1);
+        assert_eq!(scan.fixed, 0);
+
+        let fixed = sync::doctor_scan(&st, Scope::Project, Some(tmp_proj.path()), true).unwrap();
+        assert_eq!(fixed.fixed, 1);
+
+        // Second run: stale entry should be gone.
+        let again = sync::doctor_scan(&st, Scope::Project, Some(tmp_proj.path()), false).unwrap();
+        assert!(again.mv_stale_lock.is_empty());
+    }
+
+    #[test]
+    fn sync_scope_empty_manifest_is_noop() {
+        let _g = home_guard();
+        let _h = setup_home();
+        let tmp_proj = tempfile::tempdir().unwrap();
+
+        let st = AppState::new();
+        let res = sync::sync_scope(
+            &st,
+            Scope::Project,
+            Some(tmp_proj.path()),
+            sync::OnDriftMode::Keep,
+        )
+        .unwrap();
+        assert!(res.installed.is_empty());
+        assert!(!res.cancelled);
+    }
+
+    #[test]
+    fn sync_parse_on_drift_rejects_diff_per_file() {
+        assert!(sync::parse_on_drift("diff-per-file").is_err());
+        assert!(sync::parse_on_drift("keep").is_ok());
+        assert!(sync::parse_on_drift("overwrite").is_ok());
+        assert!(sync::parse_on_drift("snapshot-then-overwrite").is_ok());
+        assert!(sync::parse_on_drift("cancel").is_ok());
+        assert!(sync::parse_on_drift("garbage").is_err());
     }
 
     #[test]
