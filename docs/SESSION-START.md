@@ -13,7 +13,7 @@ drift-safe sync, and pluggable extension points.
 
 ## Where we are right now
 
-As of `aafd5a2` on `refactor/cross-agent-pivot` (10 commits ahead, not yet pushed).
+As of `6132cdd` on `refactor/cross-agent-pivot`.
 
 - **CLI feature-complete for core flows.** `rig init / install / sync
   / status / list / uninstall / pack / link / unlink / init-skill /
@@ -119,23 +119,22 @@ All four must pass before merge.
 
 Per ADR-015 we direct-execute. Ordered by value:
 
-1. **Push 10 commits to origin** — branch is 10 ahead of `main`.
-2. **Hook + Plugin support** — only two unit types still stubbed.
+1. **Hook + Plugin support** — only two unit types still stubbed.
    Hooks need settings.json merge design (risky, touches user state).
-3. **Provider expansion** — asm ships 18 adapters; we have 2. Add
+2. **Provider expansion** — asm ships 18 adapters; we have 2. Add
    Cursor / Windsurf / Aider / Cline / Copilot / Zed etc. Each is a
    new `rig-adapter-<name>` crate. Use `rig-new-adapter` dogfood skill.
-4. **Security scanner** — pre-install SKILL.md audit for dangerous
+3. **Security scanner** — pre-install SKILL.md audit for dangerous
    patterns (shell exec, net, creds, obfuscation). Differentiator.
-5. **Registry + catalog infra** — `rig-registry` public index,
+4. **Registry + catalog infra** — `rig-registry` public index,
    `rig publish`, `rig browse`, catalog website.
-6. **GUI polish** — drift resolution diff-per-file UI (CLI-only
+5. **GUI polish** — drift resolution diff-per-file UI (CLI-only
    today), command palette (⌘K unit-jump), dark mode, project
    folder picker.
-7. **TUI resurrection** (ADR-008 reversal?) — asm's main hook.
-8. **Bundle composition + SemVer intersection** (#8) — transitive
+6. **TUI resurrection** (ADR-008 reversal?) — asm's main hook.
+7. **Bundle composition + SemVer intersection** (#8) — transitive
    `bundles = [...]`, conflict diagnostics.
-9. **`rig-api` + daemon** (#15) — stable JSON-RPC so community
+8. **`rig-api` + daemon** (#15) — stable JSON-RPC so community
    frontends can land without forking `rig-gui`.
 
 Backfill docs (#11, #12, #13) only when an external reader needs

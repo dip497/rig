@@ -134,7 +134,7 @@ schema = "rig/v1"
 name = "my-app"
 
 [agents]
-targets = ["claude", "codex"]
+targets = ["test-agent", "test-agent-2"]
 
 [scope]
 default = "project"

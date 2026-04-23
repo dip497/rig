@@ -122,7 +122,7 @@ mod tests {
             },
             source_sha: Sha256::of(b"u"),
             install_sha: Sha256::of(b"i"),
-            agent: AgentId::from("claude"),
+            agent: AgentId::from("test-agent"),
             scope: Scope::Project,
             path: PathBuf::from("~/.claude/skills/foo/SKILL.md"),
             native_name: None,
@@ -144,7 +144,7 @@ id = "skill/github:acme/foo"
 unit_type = "skill"
 source_sha = "aaa"
 install_sha = "bbb"
-agent = "claude"
+agent = "test-agent"
 scope = "project"
 path = "~/.claude/skills/foo/SKILL.md"
 

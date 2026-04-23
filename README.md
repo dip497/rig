@@ -41,7 +41,7 @@ rig status                                  # drift state per unit
 ## CLI reference
 
 Alphabetical; every command accepts `--scope global|project|local`
-(default depends on context).
+(`local` is MCP-only; default depends on context).
 
 ### `rig disable`
 
@@ -201,6 +201,9 @@ rig unlink claude skill my-skill
 
 ## Unit types
 
+See [Unit types in concepts.md](./docs/concepts.md#unit-types) for the
+canonical taxonomy. Quick table:
+
 | Type | What it is | Claude routing | Codex routing |
 |------|-----------|----------------|----------------|
 | **skill** | SKILL.md + body (Anthropic Agent Skills) | `~/.claude/skills/<name>/` | `~/.codex/skills/<name>/` |
@@ -213,35 +216,15 @@ rig unlink claude skill my-skill
 
 ## Scopes
 
-- **global** — `~/.rig/rig.toml` + `~/.rig/rig.lock`. Writes into
-  `~/.claude/…`, `~/.codex/…`.
-- **project** — `./.rig/rig.toml` + `./.rig/rig.lock`. Writes into
-  `<project>/.claude/…`, `<project>/.codex/…`.
-- **local** — per-project override Claude uses for untrusted MCPs
-  (`.claude/settings.local.json`).
-
-Precedence for resolution: project > local > global. `rig list` flattens
-all three unless `--scope` narrows it.
+Rig supports three scopes: Global (`~/.rig/`), Project (`./.rig/`), and
+Local (Claude MCP per-project override, MCP-only). See
+[Scope in concepts.md](./docs/concepts.md#scope).
 
 ## Drift
 
-Per unit, per agent, per scope, Rig tracks three SHAs:
-
-```
-install-sha   — what we wrote (from rig.lock)
-current-sha   — what's on disk right now
-upstream-sha  — what the source now offers
-```
-
-Six states: `Clean / LocalDrift / UpstreamDrift / BothDrift / Missing /
-Orphan`. Five resolution modes via `rig sync --on-drift`:
-
-- `keep` — leave local drift alone, skip upstream.
-- `overwrite` — clobber local with upstream.
-- `diff-per-file` — interactive TUI per file (CLI only).
-- `snapshot-then-overwrite` — rename files to `.rig-backup-<ts>`,
-  then write upstream.
-- `cancel` — abort on first dirty state.
+Rig tracks three SHAs per unit (install-time, current-disk, upstream),
+classifies into six drift states, and offers five `rig sync --on-drift`
+resolution modes. See [Drift in concepts.md](./docs/concepts.md#drift).
 
 ## GUI
 

@@ -334,5 +334,42 @@ resolution UI will need per-unit progress events.
 
 ---
 
+## ADR-018 · 2026-04-21 · M1 GUI direct-links adapters; `rig-api` seam deferred to M2
+
+**Decision.** `rig-gui/src-tauri` MAY import `rig-core` and both official
+adapters (`rig-adapter-claude`, `rig-adapter-codex`) directly in M1. The
+`rig-api` JSON-RPC boundary and the daemon hop are deferred to M2, when
+the contract will have stabilised against a second frontend.
+
+**Trade-off.** Adding a third adapter (e.g. Cursor) during M1 requires
+editing the GUI crate's command dispatch alongside landing the new
+adapter crate. That coupling is acceptable until `rig-api` stabilises —
+forcing an unstable RPC hop through a single frontend would slow the
+GUI wedge without buying real isolation. This constraint lifts when
+`rig-api` is implemented (see ADR-013, ADR-015, ADR-017 and the
+"frontends swap on rig-api" line in `docs/architecture.md`).
+
+**Supersedes.** N/A. Clarifies the "No cross-adapter imports" rule in
+`CLAUDE.md` and the architecture-diagram seam wording for M1.
+
+**Revisit when.** `rig-api` contract is drafted, or a second frontend
+(VS Code / mobile / plugin) lands.
+
+---
+
+## ADR-019 · 2026-04-21 · M1 scope pivot: Claude-only TUI → cross-agent CLI+GUI
+
+**Decision.** The project's M1 scope is the cross-agent CLI + Tauri
+GUI, not the original Claude-only terminal UI. Pre-0.2 binary is
+deprecated.
+
+**Context.** Captured in prose on ADR-001 (pivot rationale) and
+ADR-008 (frontend surfaces). Extracted here as a standalone ADR so
+the CHANGELOG no longer carries the meta-note.
+
+**Supersedes.** N/A — references ADR-001 + ADR-008.
+
+---
+
 *To append a new ADR, copy the heading format and add at the bottom.
 Do not rewrite or delete earlier entries.*

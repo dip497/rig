@@ -68,6 +68,9 @@ Codex SSE and Codex project/local scope are `Unsupported` in M1.
 
 Already defined in `crates/rig-core/src/unit/mcp.rs`:
 
+> ⚠ Snapshot of `crates/rig-core/src/unit/mcp.rs`. Update this block if
+> the source changes.
+
 ```rust
 pub struct Mcp {
     pub name: String,
@@ -502,6 +505,3 @@ migration.
       `~/.codex/config.toml` are never listed, never modified.
 - [ ] All error table rows (§10) have a matching unit or integration
       test.
-- [ ] `cargo fmt --all --check && cargo clippy --workspace
-      --all-targets -- -D warnings && cargo test --workspace`
-      passes.

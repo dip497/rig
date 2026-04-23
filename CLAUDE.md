@@ -31,6 +31,7 @@ see @docs/DECISIONS.md.
   frontends.
 - **No cross-adapter imports.** `rig-adapter-claude` must never import
   `rig-adapter-codex` and vice versa. Both depend only on `rig-core`.
+  (GUI may import both adapters directly; see ADR-018.)
 - **Every new unit type** = one file in `rig-core/src/unit/` + one
   `Converter<Agent>` impl per adapter. Don't add unit-type branching
   to the resolver.

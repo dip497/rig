@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased] — `0.2.0-dev`
 
+### Changed
+
+- **Review cleanup.** ADR-018 documents the M1 GUI direct-link (deferred
+  rig-api seam until M2). README compressed to link concepts.md for
+  Scope/Drift/Unit-types. Spec docs trimmed of linter-reminders and
+  global-invariant duplication. Test fixtures in rig-core no longer
+  hardcode well-known agent names.
+
 ### Added
 
 - **GUI: project picker, unit-type filter, scope inheritance view.**
@@ -138,15 +146,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   + Y/n prompt), `snapshot-then-overwrite` (rename current to
   `<path>.rig-backup-<ts>`), or `cancel` (abort the run). Prior
   behaviour was a silent clobber.
-- Project scope pivoted from "Claude-only TUI" to "cross-agent
-  distribution and management layer" (M1 targets Claude Code and Codex).
 - Pre-pivot codebase archived to `crates/rig-legacy/` as reference only;
-  excluded from the default workspace build.
+  excluded from the default workspace build. (M1 scope pivot itself is
+  captured in ADR-019.)
 
 ### Deprecated
 
 - Pre-0.2 `rig` binary (TUI-only, Claude-only). Replaced by `rig-cli`
-  (`rig` binary, cross-agent) once M1 lands.
+  (`rig` binary, cross-agent). M1 landed; the pre-0.2 binary is removed
+  after migration completes.
 
 ## [0.1.x] — pre-pivot
 

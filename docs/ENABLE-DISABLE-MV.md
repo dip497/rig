@@ -324,6 +324,9 @@ Exit codes:
 
 Extend `rig_core::Adapter`:
 
+> ⚠ Snapshot of `crates/rig-core/src/adapter.rs`. Update this block if
+> the source changes.
+
 ```rust
 pub trait Adapter {
     // ...existing methods...
@@ -405,8 +408,7 @@ Test surfaces and required coverage:
 5. A simulated crash between `rig mv` steps 3 and 4 leaves both
    scopes populated; `rig doctor` (or the documented manual
    reconcile) resolves cleanly.
-6. No adapter imports another adapter. `rig-core` remains I/O-free.
-7. Unsupported unit types (Hook, Plugin) error with exit 23 and a
+6. Unsupported unit types (Hook, Plugin) error with exit 23 and a
    message pointing at open question O1.
 
 ## Open questions
