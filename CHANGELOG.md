@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased] — `0.2.0-dev`
 
+### Added
+
+- **Install script.** `curl -fsSL https://raw.githubusercontent.com/dipendra-sharma/rig/main/install.sh | sh`
+  downloads a prebuilt `rig` binary for Linux x86_64 / aarch64 (musl
+  static) and macOS x86_64 / arm64 from GitHub Releases, verifies the
+  SHA-256 checksum against the release's `checksums.txt`, and installs
+  to `~/.local/bin/rig` (override via `RIG_INSTALL_DIR`). Pin a specific
+  tag with `RIG_VERSION=vX.Y.Z`. Releases are produced by the
+  `.github/workflows/release.yml` workflow on `v*` tag push (matrix
+  includes Windows x86_64 as well).
+
 ### Fixed
 
 - **MCP install** now works for both claude and codex (missing `Unit::Mcp`
