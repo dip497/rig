@@ -7,6 +7,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased] — `0.2.0-dev`
 
+### Fixed
+
+- **MCP install** now works for both claude and codex (missing `Unit::Mcp`
+  arm in native-diffing path). Stress-test scenarios 6-9 unblocked.
+- **Overwrite drift mode** no longer silently destroys local edits. A
+  snapshot of pre-install bytes is now always written to
+  `<scope>/.rig/snapshots/<ts>/<agent>/<type>/<name>/`. `overwrite` and
+  `snapshot-then-overwrite` are now equivalent; the latter kept as alias.
+  Unparseable on-disk bytes (broken frontmatter, etc.) are still
+  snapshotted — the drift path falls back to raw file reads when
+  `read_local` fails so the user's bytes never get silently clobbered.
+
+### Added
+
+- **`rig inspect <source>`** — preview a skill/mcp/rule/etc from any
+  source (local, tarball, http, github) without installing. `--json`
+  for scripting. `--raw <path>` dumps a single file.
+- **`rig init-mcp <name>`** scaffolds `<name>/mcp.toml` with a valid
+  stdio template. `--transport http|sse` for alternates.
+- **`rig search` matches frontmatter description** by default. New
+  `--full` flag also scans body bytes. JSON output gains
+  `matched_in: "name"|"description"|"body"`.
+
 ### Changed
 
 - **GUI theme system.** Full theme refactor per `docs/THEME-SYSTEM.md`:

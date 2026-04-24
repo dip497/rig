@@ -119,13 +119,45 @@ enum Command {
         #[arg(long = "in")]
         in_dir: Option<PathBuf>,
     },
-    /// Substring search across installed units (name + type).
+    /// Scaffold a new MCP server definition (`<name>/mcp.toml`).
+    InitMcp {
+        name: String,
+        /// Parent directory to create `<name>/` in. Defaults to CWD.
+        #[arg(long = "in")]
+        in_dir: Option<PathBuf>,
+        /// Transport template: stdio (default), http, or sse.
+        #[arg(long, value_enum, default_value_t = CliMcpTransport::Stdio)]
+        transport: CliMcpTransport,
+    },
+    /// Preview a unit from any source (local, tarball, http, github)
+    /// without installing it. Safe read-only operation; never touches
+    /// the manifest, lockfile, or any agent directory.
+    Inspect {
+        source: String,
+        /// Emit structured JSON instead of human-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Print the exact bytes of one file from the fetched layout
+        /// to stdout. Useful for piping / diffing.
+        #[arg(long = "raw")]
+        raw: Option<String>,
+        /// Override unit-type detection (skill|rule|command|subagent|mcp).
+        #[arg(long = "as", value_enum)]
+        as_type: Option<CliUnitType>,
+    },
+    /// Substring search across installed units. Matches name + type +
+    /// frontmatter description by default; pass `--full` to also scan
+    /// body bytes.
     Search {
         query: String,
         #[arg(long, value_enum, default_value_t = CliScopeAll::All)]
         scope: CliScopeAll,
         #[arg(long)]
         json: bool,
+        /// Also scan unit body. Ignored when the query is shorter than
+        /// 3 characters (avoid pathological full scans).
+        #[arg(long)]
+        full: bool,
     },
     /// Per-agent × scope breakdown: counts + disk usage.
     Stats {
@@ -252,14 +284,24 @@ impl CliAgent {
 enum OnDrift {
     /// Leave the local version alone; skip the write.
     Keep,
-    /// Overwrite without asking.
+    /// Overwrite after copying pre-install bytes to
+    /// `<scope>/.rig/snapshots/<ts>/<agent>/<type>/<name>/`. The path
+    /// is printed so recovery is one `cp` away.
     Overwrite,
     /// Show a unified diff and prompt for confirmation.
     DiffPerFile,
-    /// Rename the local files to `<path>.rig-backup-<ts>` before writing.
+    /// Alias for `overwrite` — both now snapshot before writing. Kept
+    /// so existing scripts keep working.
     SnapshotThenOverwrite,
     /// Abort the entire run.
     Cancel,
+}
+
+#[derive(Copy, Clone, ValueEnum)]
+enum CliMcpTransport {
+    Stdio,
+    Http,
+    Sse,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -321,7 +363,23 @@ fn main() -> Result<()> {
             force,
         } => link(&path, scope.into(), &agent, force),
         Command::InitSkill { name, in_dir } => init_skill(&name, in_dir.as_deref()),
-        Command::Search { query, scope, json } => search(&query, scope, json),
+        Command::InitMcp {
+            name,
+            in_dir,
+            transport,
+        } => init_mcp(&name, in_dir.as_deref(), transport),
+        Command::Inspect {
+            source,
+            json,
+            raw,
+            as_type,
+        } => inspect(&source, json, raw.as_deref(), as_type.map(Into::into)),
+        Command::Search {
+            query,
+            scope,
+            json,
+            full,
+        } => search(&query, scope, json, full),
         Command::Stats { scope, json } => stats(scope, json),
         Command::Unlink {
             target,
@@ -486,10 +544,45 @@ fn apply_with_drift_resolution(
 ) -> Result<Option<Receipt>> {
     let incoming_native = native_for(adapter, unit)?;
 
-    // Compute current on-disk layout, if any.
+    // Compute current on-disk layout, if any. When `read_local` fails
+    // (user broke the frontmatter, hand-edited a required field away,
+    // etc.) we still want to know whether files exist so we snapshot
+    // before overwriting — falling back to the list-reported paths.
     let current_native = match adapter.read_local(unit_ref, scope) {
         Ok(local) => Some(native_for(adapter, &local)?),
-        Err(_) => None,
+        Err(_) => {
+            let listed = adapter.list(scope).unwrap_or_default();
+            listed
+                .iter()
+                .find(|u| {
+                    u.unit_ref.unit_type == unit_ref.unit_type && u.unit_ref.name == unit_ref.name
+                })
+                .and_then(|iu| {
+                    // Build a synthetic NativeLayout from on-disk bytes so
+                    // drift detection and snapshots still work.
+                    let files: Vec<rig_core::converter::NativeFile> = iu
+                        .paths
+                        .iter()
+                        .filter(|p| p.exists())
+                        .filter_map(|p| {
+                            let bytes = std::fs::read(p).ok()?;
+                            let rel = p
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            Some(rig_core::converter::NativeFile {
+                                relative_path: rel,
+                                bytes,
+                            })
+                        })
+                        .collect();
+                    if files.is_empty() {
+                        None
+                    } else {
+                        Some(NativeLayout { files })
+                    }
+                })
+        }
     };
 
     // Clean shortcut: if prior install_sha == current on-disk hash AND
@@ -530,8 +623,13 @@ fn apply_with_drift_resolution(
         }
     };
 
-    // Clean / Missing: safe to write directly.
-    if matches!(drift_state, DriftState::Clean | DriftState::Missing) {
+    // Clean: bytes match. Missing is only safe to write when the disk
+    // really is empty — if `current_native` is Some (typically because
+    // the user tampered with the file into an unparseable state), we
+    // must treat it as LocalDrift so the user's bytes are snapshotted.
+    if drift_state == DriftState::Clean
+        || (drift_state == DriftState::Missing && current_native.is_none())
+    {
         let r = adapter.install(unit, scope)?;
         return Ok(Some(r));
     }
@@ -547,21 +645,18 @@ fn apply_with_drift_resolution(
             );
             Ok(None)
         }
-        OnDrift::Overwrite => {
+        // `Overwrite` and `SnapshotThenOverwrite` are now equivalent —
+        // we never silently destroy local edits (CLAUDE.md §critical).
+        // The latter is retained as an alias for existing scripts.
+        OnDrift::Overwrite | OnDrift::SnapshotThenOverwrite => {
+            let (snap_dir, n_copied) =
+                snapshot_current(current_native.as_ref(), adapter, unit_ref, scope)?;
             let r = adapter.install(unit, scope)?;
+            if n_copied > 0 {
+                println!("  backed up {} file(s) to {}", n_copied, snap_dir.display());
+            }
             println!(
                 "  overwrote (had local-drift) {}/{} [{}]",
-                type_slug(r.unit_ref.unit_type),
-                r.unit_ref.name,
-                adapter.agent(),
-            );
-            Ok(Some(r))
-        }
-        OnDrift::SnapshotThenOverwrite => {
-            snapshot_current(current_native.as_ref(), adapter, unit_ref, scope)?;
-            let r = adapter.install(unit, scope)?;
-            println!(
-                "  snapshotted + overwrote {}/{} [{}]",
                 type_slug(r.unit_ref.unit_type),
                 r.unit_ref.name,
                 adapter.agent(),
@@ -609,10 +704,12 @@ fn native_for(adapter: &dyn Adapter, unit: &Unit) -> Result<NativeLayout> {
         ("claude", Unit::Rule(u)) => RuleConverter.to_native(u)?,
         ("claude", Unit::Command(u)) => CommandConverter.to_native(u)?,
         ("claude", Unit::Subagent(u)) => SubagentConverter.to_native(u)?,
+        ("claude", Unit::Mcp(u)) => ClaudeMCPConverter.to_native(u)?,
         ("codex", Unit::Skill(u)) => rig_adapter_codex::SkillConverter.to_native(u)?,
         ("codex", Unit::Rule(u)) => rig_adapter_codex::RuleConverter.to_native(u)?,
         ("codex", Unit::Command(u)) => rig_adapter_codex::CommandConverter.to_native(u)?,
         ("codex", Unit::Subagent(u)) => rig_adapter_codex::SubagentConverter.to_native(u)?,
+        ("codex", Unit::Mcp(u)) => rig_adapter_codex::MCPConverter.to_native(u)?,
         _ => bail!("unsupported (agent, unit) combination for native diffing"),
     };
     Ok(native)
@@ -629,38 +726,103 @@ fn hash_layout(l: &NativeLayout) -> rig_core::source::Sha256 {
     rig_core::source::Sha256::of(&bytes)
 }
 
-/// For each file the incoming layout would write, rename the current
-/// on-disk file (if any) to `<path>.rig-backup-<ts>`.
+/// Format a UNIX timestamp (seconds) as an RFC3339-ish directory name
+/// safe on all filesystems: `YYYY-MM-DDTHH-MM-SSZ` (colons replaced).
+fn rfc3339_dirname(secs: u64) -> String {
+    // Minimal RFC3339 without extra crates. Uses the epoch-to-UTC algo.
+    let days = (secs / 86_400) as i64;
+    let rem = (secs % 86_400) as u32;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+
+    // Civil from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z",
+        y, m, d, hour, minute, second
+    )
+}
+
+/// Copy (not rename) every on-disk file belonging to `(unit_ref, agent,
+/// scope)` into `<scope-dir>/.rig/snapshots/<rfc3339>/<agent>/<type>/<name>/`.
+/// Returns the snapshot directory and number of files copied.
 fn snapshot_current(
     _current: Option<&NativeLayout>,
     adapter: &dyn Adapter,
     unit_ref: &UnitRef,
     scope: CoreScope,
-) -> Result<()> {
-    // Use the adapter's list (which does NOT parse content) to get the
-    // actual on-disk paths. This works even when the local bytes are
-    // unparseable (e.g. user broke the frontmatter).
+) -> Result<(PathBuf, usize)> {
     let listed = adapter.list(scope).unwrap_or_default();
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let ts_dir = rfc3339_dirname(ts);
 
+    // Snapshots always live under the scope's `.rig/` dir (project for
+    // Project/Local, home/.rig for Global).
+    let base = store::scope_dir(scope)?
+        .join("snapshots")
+        .join(&ts_dir)
+        .join(adapter.agent().as_str())
+        .join(type_slug(unit_ref.unit_type))
+        .join(&unit_ref.name);
+
+    let mut copied = 0usize;
     if let Some(iu) = listed
         .iter()
         .find(|u| u.unit_ref.unit_type == unit_ref.unit_type && u.unit_ref.name == unit_ref.name)
     {
+        // Find the common ancestor of all paths so we preserve relative
+        // layout under the snapshot directory.
+        let root = common_parent(&iu.paths);
         for p in &iu.paths {
             if !p.exists() {
                 continue;
             }
-            let mut backup = p.clone().into_os_string();
-            backup.push(format!(".rig-backup-{ts}"));
-            std::fs::rename(p, std::path::PathBuf::from(&backup))
-                .with_context(|| format!("snapshotting {}", p.display()))?;
+            let rel = match &root {
+                Some(r) => p.strip_prefix(r).unwrap_or(p).to_path_buf(),
+                None => PathBuf::from(p.file_name().map(|n| n.to_os_string()).unwrap_or_default()),
+            };
+            let dst = base.join(&rel);
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating snapshot dir {}", parent.display()))?;
+            }
+            let bytes = std::fs::read(p)
+                .with_context(|| format!("reading {} for snapshot", p.display()))?;
+            rig_fs::atomic_write(&dst, &bytes)
+                .with_context(|| format!("snapshotting {} → {}", p.display(), dst.display()))?;
+            copied += 1;
         }
     }
-    Ok(())
+    Ok((base, copied))
+}
+
+fn common_parent(paths: &[PathBuf]) -> Option<PathBuf> {
+    let mut iter = paths.iter().filter_map(|p| p.parent().map(PathBuf::from));
+    let first = iter.next()?;
+    Some(iter.fold(first, |acc, p| {
+        let mut out = PathBuf::new();
+        for (a, b) in acc.components().zip(p.components()) {
+            if a == b {
+                out.push(a.as_os_str());
+            } else {
+                break;
+            }
+        }
+        out
+    }))
 }
 
 /// Print a unified diff per file and prompt Y/n. Returns true on
@@ -1378,6 +1540,196 @@ fn init_skill(name: &str, in_dir: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+fn init_mcp(name: &str, in_dir: Option<&Path>, transport: CliMcpTransport) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        bail!("invalid mcp name `{name}`");
+    }
+    let parent = in_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let dir = parent.join(name);
+    if dir.exists() {
+        bail!("`{}` already exists", dir.display());
+    }
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let mcp_toml = dir.join("mcp.toml");
+    let body = match transport {
+        CliMcpTransport::Stdio => format!(
+            "# MCP server config consumed by Rig. See docs/MCP-SUPPORT.md.\n\
+             schema = \"rig/v1\"\n\
+             kind = \"mcp\"\n\
+             name = \"{name}\"\n\
+             description = \"One-line description for when the agent should use this server.\"\n\
+             \n\
+             [transport]\n\
+             kind = \"stdio\"\n\
+             command = \"npx\"\n\
+             args = [\"-y\", \"@example/mcp\"]\n\
+             \n\
+             # Declare env var names the server reads. Values live in the\n\
+             # shell env / agent-native secret store — Rig never embeds them.\n\
+             # env = [\"API_KEY\"]\n"
+        ),
+        CliMcpTransport::Http => format!(
+            "# MCP server config consumed by Rig. See docs/MCP-SUPPORT.md.\n\
+             schema = \"rig/v1\"\n\
+             kind = \"mcp\"\n\
+             name = \"{name}\"\n\
+             description = \"One-line description for when the agent should use this server.\"\n\
+             \n\
+             [transport]\n\
+             kind = \"http\"\n\
+             url = \"https://example.com/mcp\"\n\
+             \n\
+             # [transport.headers]\n\
+             # Authorization = \"Bearer ${{API_TOKEN}}\"\n"
+        ),
+        CliMcpTransport::Sse => format!(
+            "# MCP server config consumed by Rig. See docs/MCP-SUPPORT.md.\n\
+             schema = \"rig/v1\"\n\
+             kind = \"mcp\"\n\
+             name = \"{name}\"\n\
+             description = \"One-line description for when the agent should use this server.\"\n\
+             \n\
+             [transport]\n\
+             kind = \"sse\"\n\
+             url = \"https://example.com/sse\"\n\
+             \n\
+             # [transport.headers]\n\
+             # Authorization = \"Bearer ${{API_TOKEN}}\"\n"
+        ),
+    };
+    rig_fs::atomic_write(&mcp_toml, body.as_bytes())
+        .with_context(|| format!("writing {}", mcp_toml.display()))?;
+    println!("created {}", mcp_toml.display());
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct InspectFile {
+    path: String,
+    size: usize,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct InspectJson<'a> {
+    source: String,
+    source_sha: String,
+    detected_type: Option<&'a str>,
+    files: Vec<InspectFile>,
+    name: Option<String>,
+    description: Option<String>,
+}
+
+fn inspect(
+    source_ref: &str,
+    json: bool,
+    raw: Option<&str>,
+    as_type: Option<UnitType>,
+) -> Result<()> {
+    let source =
+        Source::parse(source_ref).with_context(|| format!("parsing source `{source_ref}`"))?;
+    let fetched = rig_source::fetch(&source).with_context(|| format!("fetching `{source_ref}`"))?;
+
+    // --raw short-circuits everything else and dumps exact bytes.
+    if let Some(target) = raw {
+        let file = fetched
+            .native
+            .files
+            .iter()
+            .find(|f| f.relative_path == target)
+            .ok_or_else(|| anyhow::anyhow!("no such file in source: {target}"))?;
+        use std::io::Write;
+        std::io::stdout()
+            .write_all(&file.bytes)
+            .context("writing bytes to stdout")?;
+        return Ok(());
+    }
+
+    // Try to parse the unit so we can surface name + description.
+    let (name, description) = match as_type.or(fetched.detected) {
+        Some(UnitType::Skill) => SkillConverter
+            .parse_native(&fetched.native)
+            .map(|s| (Some(s.name), Some(s.description)))
+            .unwrap_or((None, None)),
+        Some(UnitType::Rule) => RuleConverter
+            .parse_native(&fetched.native)
+            .map(|r| (Some(r.name), r.description))
+            .unwrap_or((None, None)),
+        Some(UnitType::Command) => CommandConverter
+            .parse_native(&fetched.native)
+            .map(|c| (Some(c.name), c.description))
+            .unwrap_or((None, None)),
+        Some(UnitType::Subagent) => SubagentConverter
+            .parse_native(&fetched.native)
+            .map(|s| (Some(s.name), Some(s.description)))
+            .unwrap_or((None, None)),
+        Some(UnitType::Mcp) => ClaudeMCPConverter
+            .parse_native(&fetched.native)
+            .map(|m| (Some(m.name), m.description))
+            .unwrap_or((None, None)),
+        _ => (None, None),
+    };
+
+    if json {
+        let out = InspectJson {
+            source: source.to_string(),
+            source_sha: fetched.source_sha.to_string(),
+            detected_type: fetched.detected.map(type_slug),
+            files: fetched
+                .native
+                .files
+                .iter()
+                .map(|f| InspectFile {
+                    path: f.relative_path.clone(),
+                    size: f.bytes.len(),
+                    sha256: rig_core::source::Sha256::of(&f.bytes).to_string(),
+                })
+                .collect(),
+            name,
+            description,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    println!("source: {}", source);
+    println!("source_sha: {}", fetched.source_sha);
+    match fetched.detected {
+        Some(t) => println!("type: {}", type_slug(t)),
+        None => println!("type: (not auto-detected; pass --as <type>)"),
+    }
+    if let Some(n) = &name {
+        println!("name: {}", n);
+    }
+    if let Some(d) = &description {
+        println!("description: {}", d);
+    }
+    println!("\nfiles:");
+    for f in &fetched.native.files {
+        let sha = rig_core::source::Sha256::of(&f.bytes).to_string();
+        let short: String = sha.chars().take(8).collect();
+        println!("  {} ({} B, sha {})", f.relative_path, f.bytes.len(), short);
+    }
+
+    // Body preview for the canonical entry file if present.
+    let preview_target = fetched.native.files.iter().find(|f| {
+        matches!(
+            f.relative_path.as_str(),
+            "SKILL.md" | "AGENTS.md" | "mcp.toml"
+        )
+    });
+    if let Some(f) = preview_target {
+        let text = String::from_utf8_lossy(&f.bytes);
+        println!("\n{} preview (first 20 lines):", f.relative_path);
+        for line in text.lines().take(20) {
+            println!("  {}", line);
+        }
+    }
+    Ok(())
+}
+
 fn title_case(s: &str) -> String {
     s.split(['-', '_', ' '])
         .filter(|p| !p.is_empty())
@@ -1402,21 +1754,115 @@ struct SearchRow<'a> {
     scope: &'static str,
     paths: Vec<String>,
     linked: bool,
+    matched_in: &'static str,
 }
 
-fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
+/// Where in a unit a substring search matched. Priority (highest wins):
+/// name > description > body.
+#[derive(Copy, Clone)]
+enum MatchSite {
+    Name,
+    Description,
+    Body,
+}
+
+impl MatchSite {
+    fn slug(self) -> &'static str {
+        match self {
+            MatchSite::Name => "name",
+            MatchSite::Description => "description",
+            MatchSite::Body => "body",
+        }
+    }
+}
+
+/// Extract (description, body) from a canonical Unit. Either may be
+/// empty when the unit type does not carry that field.
+fn unit_description_body(u: &Unit) -> (String, String) {
+    match u {
+        Unit::Skill(s) => (s.description.clone(), s.body.clone()),
+        Unit::Rule(r) => (r.description.clone().unwrap_or_default(), r.body.clone()),
+        Unit::Command(c) => (c.description.clone().unwrap_or_default(), c.body.clone()),
+        Unit::Subagent(s) => (s.description.clone(), s.body.clone()),
+        Unit::Mcp(m) => (m.description.clone().unwrap_or_default(), String::new()),
+        _ => (String::new(), String::new()),
+    }
+}
+
+/// Try to return 3 lines of context around the first match of `q` in
+/// `text`. Returns None when there is no hit.
+fn match_snippet(text: &str, q: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let idx = lower.find(&q.to_lowercase())?;
+    // Find line number of idx.
+    let before = &text[..idx];
+    let line_no = before.bytes().filter(|b| *b == b'\n').count();
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let lo = line_no.saturating_sub(1);
+    let hi = (line_no + 2).min(lines.len());
+    Some(
+        lines[lo..hi]
+            .iter()
+            .map(|l| format!("    {}", l))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn search(query: &str, scope: CliScopeAll, json: bool, full: bool) -> Result<()> {
     let scopes = scope.scopes();
     let all = collect_all(&scopes)?;
     let link_keys = link_key_set(&scopes);
-    let matches: Vec<_> = all
-        .into_iter()
-        .filter(|(_, _, u)| matches_query(query, u.unit_ref.unit_type, &u.unit_ref.name))
-        .collect();
+    let q_lower = query.to_lowercase();
+    let scan_body = full && query.len() >= 3;
+
+    // Collect matches + site + optional snippet.
+    let mut matches: Vec<(
+        rig_core::agent::AgentId,
+        CoreScope,
+        InstalledUnit,
+        MatchSite,
+        Option<String>,
+    )> = Vec::new();
+    for (agent, sc, u) in all.into_iter() {
+        // Cheap checks first.
+        if u.unit_ref.name.to_lowercase().contains(&q_lower)
+            || type_slug(u.unit_ref.unit_type).contains(&q_lower)
+        {
+            matches.push((agent, sc, u, MatchSite::Name, None));
+            continue;
+        }
+
+        // Description match — read_local to pull frontmatter. Body too
+        // when --full.
+        let adapter: Box<dyn Adapter> = match agent.as_str() {
+            s if s == rig_adapter_claude::AGENT_ID => Box::new(ClaudeAdapter::new()),
+            s if s == rig_adapter_codex::AGENT_ID => Box::new(CodexAdapter::new()),
+            _ => continue,
+        };
+        let local = match adapter.read_local(&u.unit_ref, sc) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let (desc, body) = unit_description_body(&local);
+        if desc.to_lowercase().contains(&q_lower) {
+            let snip = match_snippet(&desc, query);
+            matches.push((agent, sc, u, MatchSite::Description, snip));
+            continue;
+        }
+        if scan_body && body.to_lowercase().contains(&q_lower) {
+            let snip = match_snippet(&body, query);
+            matches.push((agent, sc, u, MatchSite::Body, snip));
+        }
+    }
 
     if json {
         let rows: Vec<SearchRow<'_>> = matches
             .iter()
-            .map(|(agent, sc, u)| SearchRow {
+            .map(|(agent, sc, u, site, _)| SearchRow {
                 agent: agent.as_str(),
                 unit_type: type_slug(u.unit_ref.unit_type),
                 name: u.unit_ref.name.clone(),
@@ -1428,6 +1874,7 @@ fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
                     u.unit_ref.name.clone(),
                     *sc,
                 )),
+                matched_in: site.slug(),
             })
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -1438,7 +1885,7 @@ fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
         println!("no matches");
         return Ok(());
     }
-    for (agent, sc, u) in &matches {
+    for (agent, sc, u, site, snip) in &matches {
         let path = u
             .paths
             .first()
@@ -1451,18 +1898,24 @@ fn search(query: &str, scope: CliScopeAll, json: bool) -> Result<()> {
             *sc,
         ));
         println!(
-            "{}/{}  [{}]  ({})  {}{}",
+            "{}/{}  [{}]  ({})  {}{}  <{}>",
             type_slug(u.unit_ref.unit_type),
             u.unit_ref.name,
             agent,
             scope_slug(*sc),
             path,
             if linked { "  (linked)" } else { "" },
+            site.slug(),
         );
+        if let Some(s) = snip {
+            println!("{}", s);
+        }
     }
     Ok(())
 }
 
+/// Legacy helper, retained for callers/tests that only want name+type.
+#[allow(dead_code)]
 fn matches_query(q: &str, ty: UnitType, name: &str) -> bool {
     let q = q.to_lowercase();
     name.to_lowercase().contains(&q) || type_slug(ty).contains(&q)
@@ -2530,15 +2983,31 @@ mod tests {
             assert!(std::fs::read_to_string(&r.paths[0])
                 .unwrap()
                 .contains("upstream-v2"));
-            // A backup file exists next to the original.
-            let parent = r.paths[0].parent().unwrap();
-            let names: Vec<String> = std::fs::read_dir(parent)
+            // Fix 2: backup lives under <scope>/.rig/snapshots/<ts>/...
+            let snap_root = store::scope_dir(CoreScope::Global)
                 .unwrap()
-                .filter_map(|e| e.ok())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect();
-            let has_backup = names.iter().any(|n| n.contains(".rig-backup-"));
-            assert!(has_backup, "no backup file found, dir has: {names:?}");
+                .join("snapshots");
+            assert!(
+                snap_root.is_dir(),
+                "no snapshots dir at {}",
+                snap_root.display()
+            );
+            // Walk and collect all files under snap_root.
+            let mut found_tampered = false;
+            fn walk(dir: &Path, found: &mut bool) {
+                for e in std::fs::read_dir(dir).unwrap().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, found);
+                    } else if let Ok(b) = std::fs::read(&p) {
+                        if b == b"tampered\n" {
+                            *found = true;
+                        }
+                    }
+                }
+            }
+            walk(&snap_root, &mut found_tampered);
+            assert!(found_tampered, "tampered bytes not found in snapshot tree");
         });
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -2899,6 +3368,106 @@ mod tests {
                 .iter()
                 .any(|(_, _, u)| u.unit_ref.unit_type == UnitType::Mcp);
             assert!(!leaked, "foreign MCP leaked into collect_all");
+        });
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ---------- Fix 1: MCP goes through native_for for both adapters ----
+
+    #[test]
+    fn native_for_handles_mcp_both_agents() {
+        let m = rig_core::unit::Mcp {
+            name: "demo".into(),
+            description: Some("demo".into()),
+            transport: rig_core::unit::mcp::Transport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@demo/mcp".into()],
+            },
+            env: Vec::new(),
+            metadata: Default::default(),
+        };
+        let unit = Unit::Mcp(m);
+
+        let claude = ClaudeAdapter::new();
+        let lay_c = native_for(&claude, &unit).expect("claude native_for Unit::Mcp");
+        assert!(!lay_c.files.is_empty(), "claude MCP layout empty");
+
+        let codex = CodexAdapter::new();
+        let lay_x = native_for(&codex, &unit).expect("codex native_for Unit::Mcp");
+        assert!(!lay_x.files.is_empty(), "codex MCP layout empty");
+    }
+
+    // ---------- Fix 4: init-mcp writes a parseable mcp.toml ----
+
+    #[test]
+    fn init_mcp_stdio_writes_parseable() {
+        let tmp = tempdir("init-mcp");
+        init_mcp("demo", Some(&tmp), CliMcpTransport::Stdio).unwrap();
+        let body = std::fs::read_to_string(tmp.join("demo").join("mcp.toml")).unwrap();
+        assert!(body.contains("name = \"demo\""));
+        assert!(body.contains("kind = \"stdio\""));
+        // Full parse via the canonical source parser.
+        let mcp = rig_core::unit::mcp::parse_source(&body).expect("mcp.toml parses");
+        assert_eq!(mcp.name, "demo");
+        assert!(matches!(
+            mcp.transport,
+            rig_core::unit::mcp::Transport::Stdio { .. }
+        ));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ---------- Fix 3: inspect prints expected frontmatter + files ----
+
+    #[test]
+    fn inspect_local_skill_smoke() {
+        let tmp = tempdir("inspect");
+        let skill_dir = tmp.join("xyz-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: xyz-skill\ndescription: inspect-me\n---\n\nbody here\n",
+        )
+        .unwrap();
+        // Just make sure inspect() runs without error on a local path.
+        // (Output is captured by println; we don't assert on stdout.)
+        let src = format!("local:{}", skill_dir.display());
+        inspect(&src, false, None, None).expect("inspect runs");
+        // JSON mode should also succeed.
+        inspect(&src, true, None, None).expect("inspect --json runs");
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ---------- Fix 5: search matches description ----
+
+    #[test]
+    fn search_matches_description_substring() {
+        let tmp = tempdir("search-desc");
+        with_home(&tmp, || {
+            // Install a skill whose description contains "xyzzy".
+            let adapter = ClaudeAdapter::new();
+            let u = Unit::Skill(rig_core::unit::Skill {
+                name: "needle".into(),
+                description: "contains xyzzy marker for search test".into(),
+                extra_frontmatter: Default::default(),
+                body: "body".into(),
+                resources: Vec::new(),
+            });
+            adapter.install(&u, CoreScope::Global).unwrap();
+
+            // Verify the description-match path via the same helpers.
+            let all = collect_all(&[CoreScope::Global]).unwrap();
+            let hit = all.iter().find(|(_, _, u)| u.unit_ref.name == "needle");
+            assert!(hit.is_some(), "skill not listed: {all:?}");
+            let (_agent, sc, unit) = hit.unwrap();
+            let local = adapter.read_local(&unit.unit_ref, *sc).unwrap();
+            let (desc, _body) = unit_description_body(&local);
+            assert!(
+                desc.to_lowercase().contains("xyzzy"),
+                "description missing marker: {desc:?}"
+            );
+            // Name-based query should NOT match (no xyzzy in name);
+            // description-based query MUST match via the new logic.
+            assert!(!matches_query("xyzzy", UnitType::Skill, "needle"));
         });
         std::fs::remove_dir_all(&tmp).ok();
     }
