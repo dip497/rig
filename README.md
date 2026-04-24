@@ -20,12 +20,22 @@ MCP servers, rules, commands, subagents — across Claude Code and Codex.
 
 ## Install
 
-M1 ships as source. Pre-built binaries come later.
+**One-liner (Linux + macOS):**
 
 ```sh
-git clone https://github.com/griflet/rig
-cd rig
-cargo install --path crates/rig-cli
+curl -fsSL https://raw.githubusercontent.com/dipendra-sharma/rig/main/install.sh | sh
+```
+
+Installs the latest `rig` to `~/.local/bin/rig`. Override the destination
+with `RIG_INSTALL_DIR=/usr/local/bin`, or pin a version with
+`RIG_VERSION=v0.2.0-alpha.1`. Supports Linux x86_64 / aarch64 (musl
+static) and macOS x86_64 / arm64. Checksum is verified against the
+release's `checksums.txt`.
+
+**From source (all platforms, needs Rust 1.75+):**
+
+```sh
+cargo install --path crates/rig-cli --git https://github.com/dipendra-sharma/rig
 rig --version
 ```
 
