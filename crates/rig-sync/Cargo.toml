@@ -1,0 +1,17 @@
+[package]
+name = "rig-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Drift detection and reconciliation engine — makes on-disk state match rig.toml safely."
+
+[dependencies]
+rig-core = { workspace = true }
+rig-fs = { workspace = true }
+rig-source = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

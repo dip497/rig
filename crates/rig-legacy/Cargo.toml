@@ -1,0 +1,21 @@
+[package]
+name = "rig-legacy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Archived pre-pivot Rig — Claude-only TUI. Reference only, excluded from workspace default build."
+license = "MIT"
+authors = ["Dipendra Sharma"]
+
+[[bin]]
+name = "rig-legacy"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+anyhow = "1"
+shellexpand = "3"

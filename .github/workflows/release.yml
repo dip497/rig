@@ -2,61 +2,130 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact_name: rig
-            asset_name: rig-linux-x86_64
+          # macOS
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          # Linux (musl = fully static, zero deps)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            musl: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            archive: tar.gz
+            musl: true
+            cross: true
+          # Windows
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
 
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact_name: rig
-            asset_name: rig-macos-x86_64
-
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: rig
-            asset_name: rig-macos-aarch64
-
-    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools (aarch64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      - name: Install musl tools
+        if: matrix.musl && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
+      - name: Package (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ../../../rig-${{ matrix.target }}.${{ matrix.archive }} rig
+          cd ../../..
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../rig-${{ matrix.target }}.${{ matrix.archive }} rig.exe
+          cd ../../..
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: ./target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+          name: rig-${{ matrix.target }}
+          path: rig-${{ matrix.target }}.${{ matrix.archive }}
 
-  create-release:
+  release:
+    name: Create Release
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          files: |
-            rig-linux-x86_64/rig
-            rig-macos-x86_64/rig
-            rig-macos-aarch64/rig
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="${{ github.ref_name }}"
+          fi
+          echo "version=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Flatten artifacts and create checksums
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release/ \;
+          cd release
+          sha256sum * > checksums.txt
+          echo "Contents:"
+          ls -lh
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          files: release/*
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

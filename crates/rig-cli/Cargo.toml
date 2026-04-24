@@ -1,0 +1,33 @@
+[package]
+name = "rig-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Rig command-line interface: init, add, install, sync, status, bundle, publish."
+
+[[bin]]
+name = "rig"
+path = "src/main.rs"
+
+[dependencies]
+rig-core = { workspace = true }
+rig-api = { workspace = true }
+rig-fs = { workspace = true }
+rig-source = { workspace = true }
+rig-sync = { workspace = true }
+rig-plugin-host = { workspace = true }
+rig-adapter-claude = { workspace = true }
+rig-adapter-codex = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+similar = { workspace = true }
+tempfile = { workspace = true }

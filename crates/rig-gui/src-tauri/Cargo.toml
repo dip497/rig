@@ -1,0 +1,37 @@
+[package]
+name = "rig-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Rig desktop GUI (Tauri 2 + React). Read-only M1 dashboard."
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "rig-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[dependencies]
+rig-core = { workspace = true }
+rig-fs = { workspace = true }
+rig-source = { workspace = true }
+rig-adapter-claude = { workspace = true }
+rig-adapter-codex = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/src-tauri/icons/32x32.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Rig</title>
+    <script>
+      // Anti-FOUC: set data-theme before React mounts.
+      (function () {
+        try {
+          var m = localStorage.getItem("rig-gui.theme");
+          if (m !== "light" && m !== "dark" && m !== "system") m = "system";
+          var resolved = m;
+          if (m === "system") {
+            resolved = window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          document.documentElement.setAttribute("data-theme", resolved);
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

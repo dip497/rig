@@ -1,111 +1,275 @@
 # Rig
 
-A terminal UI for managing Claude AI skills and MCP servers.
+One tool to install, pin, sync, and share agent coding context — skills,
+MCP servers, rules, commands, subagents — across Claude Code and Codex.
 
-## Features
+[Docs](./docs/introduction.md) · [Architecture](./docs/architecture.md) ·
+[Concepts](./docs/concepts.md) · [Roadmap](./docs/roadmap.md) ·
+[Decisions](./docs/DECISIONS.md)
 
-- Manage AI skills in a modern TUI interface
-- Configure and control MCP (Model Context Protocol) servers
-- Project-based skill organization
-- Interactive matrix view for skill/project relationships
+## Why
 
-## Installation
+- **Cross-agent.** One `rig.toml`, same stack on Claude Code and Codex
+  (more adapters coming via the plugin protocol).
+- **Drift-safe.** Three-SHA drift model, six states, five explicit
+  resolution modes. Rig never overwrites local edits silently.
+- **Reproducible.** `rig.lock` pins the install-time SHA per unit, per
+  agent, per scope — bit-exact across machines.
+- **Two surfaces.** A fast CLI and a Tauri-based GUI sit on the same
+  core.
 
-### Download Pre-built Binary
+## Install
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/dip497/rig/releases):
+M1 ships as source. Pre-built binaries come later.
 
-- **Linux**: `rig-linux-x86_64`
-- **macOS Intel**: `rig-macos-x86_64`
-- **macOS Apple Silicon**: `rig-macos-aarch64`
-- **Windows**: `rig-windows-x86_64.exe`
-
-Make it executable (Linux/macOS):
-```bash
-chmod +x rig-linux-x86_64
-./rig-linux-x86_64
+```sh
+git clone https://github.com/griflet/rig
+cd rig
+cargo install --path crates/rig-cli
+rig --version
 ```
 
-### Build from Source
+## Quick start
 
-Requires Rust 1.70+:
-
-```bash
-cargo build --release
-./target/release/rig
+```sh
+rig init                                    # create ./.rig/
+rig install ./my-skill --agent claude,codex # install to both agents
+rig list                                    # what's installed
+rig status                                  # drift state per unit
 ```
 
-## Usage
+## CLI reference
 
-Launch the TUI:
+Alphabetical; every command accepts `--scope global|project|local`
+(`local` is MCP-only; default depends on context).
 
-```bash
-rig
+### `rig disable`
+
+Disable a unit without uninstalling it. Works where the host agent
+supports gating (Claude commands, skills with `.disabled` suffix).
+
+```sh
+rig disable claude skill react-review
 ```
 
-### Migrating from `npx skills`
+### `rig doctor`
 
-If you have skills installed via `npx skills add`, migrate them into rig's store:
+Scan for duplicates across scopes, broken symlinks, and stale lockfile
+entries. Pass `--fix` to auto-reconcile what can be fixed safely.
 
-```bash
-rig migrate
+```sh
+rig doctor --fix
 ```
 
-This will:
-- Move skills from `~/.agents/skills/` → `~/.rig/skills/`
-- Move config from `~/.config/rig/` → `~/.rig/`
-- Scan agent directories for loose skills
-- Create symlinks in all agent directories
+### `rig enable`
 
-### Navigation
+Re-enable a previously disabled unit.
 
-- `Tab` - Switch between panels
-- Arrow keys - Navigate lists
-- `q` - Quit
-- `?` - Help
-
-## Configuration
-
-All rig data lives in `~/.rig/`:
-
-```
-~/.rig/
-├── config.json          # Settings, agents, projects
-└── skills/              # Central skill store
-    └── <skill-name>/
-        └── SKILL.md
+```sh
+rig enable claude skill react-review
 ```
 
-Skills are enabled per-agent via symlinks:
-```
-~/.claude/skills/<name>/  →  ~/.rig/skills/<name>/   (enabled)
-```
+### `rig init`
 
-## Development
+Create `.rig/rig.toml` and `.rig/rig.lock` in the current directory.
+Detects git repos and defaults to project scope.
 
-### Build
-
-```bash
-cargo build
+```sh
+rig init
 ```
 
-### Test
+### `rig init-skill`
 
-```bash
-cargo test
+Scaffold a new skill directory (`SKILL.md` + starter frontmatter) ready
+to be `rig install`-ed.
+
+```sh
+rig init-skill my-new-skill
 ```
 
-### Lint
+### `rig install`
 
-```bash
-cargo clippy -- -D warnings
-cargo fmt --check
+Install a unit from a source into one or more agents. Source forms:
+local path, tarball, HTTP(S) URL, `github:owner/repo[@ref][#path]`.
+
+```sh
+rig install ./my-skill --agent claude,codex
+rig install github:acme/react-review@v1.2 --agent claude
 ```
+
+### `rig link`
+
+Dev-loop helper: symlink a local path into an agent's native location
+so edits show up live without re-installing.
+
+```sh
+rig link ./my-skill --agent claude
+```
+
+### `rig list`
+
+List installed units by agent / type / name with drift state.
+
+```sh
+rig list
+rig list --scope global --agent claude
+```
+
+### `rig mv`
+
+Move an installed unit between scopes (e.g. promote a project skill to
+global). Preserves the install-time SHA.
+
+```sh
+rig mv skill react-review project global
+```
+
+### `rig pack`
+
+Bundle a local unit directory into a `.rig` tarball for offline share
+or distribution.
+
+```sh
+rig pack ./my-skill -o my-skill.rig
+```
+
+### `rig search`
+
+Substring search across installed units in the current scope.
+
+```sh
+rig search review
+```
+
+### `rig stats`
+
+Per-agent, per-unit-type counts and on-disk size.
+
+```sh
+rig stats
+```
+
+### `rig status`
+
+Show drift state per unit — `Clean / LocalDrift / UpstreamDrift /
+BothDrift / Missing / Orphan`. Exits non-zero if anything is dirty, so
+it's CI-friendly.
+
+```sh
+rig status
+```
+
+### `rig sync`
+
+Read `.rig/rig.toml`, reconcile against the lockfile and disk. Pick a
+drift policy with `--on-drift`: `keep`, `overwrite`, `diff-per-file`,
+`snapshot-then-overwrite`, `cancel`.
+
+```sh
+rig sync --on-drift snapshot-then-overwrite
+```
+
+### `rig uninstall`
+
+Remove a unit from an agent. Leaves manifest entry intact; use
+`rig sync` to reconcile the manifest too.
+
+```sh
+rig uninstall claude skill react-review
+```
+
+### `rig unlink`
+
+Undo `rig link`: remove the symlink and, optionally, re-install the
+unit from source.
+
+```sh
+rig unlink claude skill my-skill
+```
+
+## Source types
+
+| Kind | Form | Status |
+|------|------|--------|
+| Local path | `./path` or `local:./path` | shipped |
+| Tarball | `./bundle.rig` or `tar:./bundle.rig` | shipped |
+| HTTP(S) | `https://…/bundle.rig` | shipped |
+| GitHub | `github:owner/repo[@ref][#subpath]` | shipped |
+| Generic git | `git:https://…` | stub |
+| npm | `npm:@scope/name` | stub |
+| Marketplace | `marketplace:…` | stub |
+
+## Unit types
+
+See [Unit types in concepts.md](./docs/concepts.md#unit-types) for the
+canonical taxonomy. Quick table:
+
+| Type | What it is | Claude routing | Codex routing |
+|------|-----------|----------------|----------------|
+| **skill** | SKILL.md + body (Anthropic Agent Skills) | `~/.claude/skills/<name>/` | `~/.codex/skills/<name>/` |
+| **rule** | Always-on project rule (CLAUDE.md / AGENTS.md) | appended to `CLAUDE.md` | appended to `AGENTS.md` |
+| **command** | Slash-command markdown | `~/.claude/commands/<name>.md` | unsupported |
+| **subagent** | Agent prompt with scope + tools | `~/.claude/agents/<name>.md` | unsupported |
+| **mcp** | MCP server config | `.mcp.json` merge (stubbed) | `config.toml` merge (stubbed) |
+| **hook** | Lifecycle hook | `settings.json` merge (stubbed) | n/a |
+| **plugin** | Claude Code plugin manifest | `~/.claude/plugins/` (stubbed) | n/a |
+
+## Scopes
+
+Rig supports three scopes: Global (`~/.rig/`), Project (`./.rig/`), and
+Local (Claude MCP per-project override, MCP-only). See
+[Scope in concepts.md](./docs/concepts.md#scope).
+
+## Drift
+
+Rig tracks three SHAs per unit (install-time, current-disk, upstream),
+classifies into six drift states, and offers five `rig sync --on-drift`
+resolution modes. See [Drift in concepts.md](./docs/concepts.md#drift).
+
+## GUI
+
+```sh
+cd crates/rig-gui
+npm install
+npm run tauri dev
+```
+
+The desktop app has three tabs:
+
+- **Units.** Table of installed units with drift badges, a detail
+  pane showing frontmatter + body, per-type filter pills
+  (`All / Skill / MCP / Rule / Command / Subagent`), and a scope
+  selector with an `all` option that merges global + project + local
+  with origin badges and shadow indicators.
+- **Stats.** Per-agent size and count breakdown.
+- **Doctor.** Duplicates, broken symlinks, stale lockfile entries,
+  with one-click auto-fix where safe.
+
+Header features an **Open project…** folder picker with a recent-
+projects dropdown. Modals:
+
+- **Install** — source input, agent picker, optional unit-type
+  override.
+- **Sync** — drift-mode radio group, live conflicts / skipped /
+  installed counts.
+
+## Architecture
+
+Cargo workspace of focused crates with a strict dependency graph.
+`rig-core` is pure types + traits (zero I/O). Everything else —
+filesystem, sources, adapters, sync, CLI, GUI — depends on `rig-core`
+only. Adapters never depend on each other. New agents = new adapter
+crate (or external plugin binary). See
+[docs/architecture.md](./docs/architecture.md) for the full graph
+and the five extensibility seams.
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [docs/contributing.md](./docs/contributing.md). Branches follow
+`feature/<scope>` / `fix/<scope>` / `docs/<scope>` / `rfc/<name>`;
+commits are imperative mood ("Add Codex MCP converter").
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+Dual-licensed under **MIT OR Apache-2.0**.
+See [LICENSE-MIT](./LICENSE-MIT), [LICENSE-APACHE](./LICENSE-APACHE).
